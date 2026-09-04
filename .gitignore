@@ -2,5 +2,5 @@
 __pycache__/
 *.pyc
 .venv/
-data/*.csv
-CLAUDE.md.DS_Store
+CLAUDE.md
+.DS_Store
