@@ -11,3 +11,18 @@ def validate_prices(product_id, comp_prices):
             raise ValueError(f'Invalid entry for competitor price for {product_id}: {comp}, must be greater than 0')
 
     return comp_prices
+
+
+def validate_ratings(product_id, comp_ratings):
+    """Check competitor ratings are well-formed. Raises ValueError if not."""
+
+    if len(comp_ratings) != 3:
+        raise ValueError(f'Invalid number of ratings for {product_id}: {len(comp_ratings)}, must be exactly 3')
+
+    for rating in comp_ratings:
+        if not isinstance(rating, (int, float)):
+            raise ValueError(f'Invalid rating type for {product_id}: {rating!r}, must be a number')
+        elif rating <= 0 or rating > 5.0:
+            raise ValueError(f'Invalid rating value for {product_id}: {rating}, must be in range (0, 5.0]')
+
+    return comp_ratings
