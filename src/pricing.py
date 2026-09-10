@@ -1,3 +1,7 @@
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+
+
 def validate_prices(product_id, comp_prices):
     """Check competitor prices are well-formed. Raises ValueError if not."""
 
@@ -6,7 +10,7 @@ def validate_prices(product_id, comp_prices):
 
     for comp in comp_prices:
         if not isinstance(comp, (int, float)):
-            raise ValueError(f'Invalid datatype for competitor price for {product_id}: {comp!r}, must be a number')
+            raise TypeError(f'Invalid datatype for competitor price for {product_id}: {comp!r}, must be a number')
         elif comp <= 0:
             raise ValueError(f'Invalid entry for competitor price for {product_id}: {comp}, must be greater than 0')
 
@@ -21,8 +25,39 @@ def validate_ratings(product_id, comp_ratings):
 
     for rating in comp_ratings:
         if not isinstance(rating, (int, float)):
-            raise ValueError(f'Invalid rating type for {product_id}: {rating!r}, must be a number')
+            raise TypeError(f'Invalid rating type for {product_id}: {rating!r}, must be a number')
         elif rating <= 0 or rating > 5.0:
             raise ValueError(f'Invalid rating value for {product_id}: {rating}, must be in range (0, 5.0]')
 
     return comp_ratings
+
+
+def validate_observed_at(product_id, observed_at):
+    """Check observed_at is a parseable date in DD-MM-YYYY format. Raises ValueError if not."""
+    try:
+        return datetime.strptime(observed_at, "%d-%m-%Y")
+    except ValueError:
+        raise ValueError(
+            f'Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY'
+        )
+
+
+def check_continuity(product_id, last_observed_mon_yr, observed_at):
+    """Check observed_at is the same month as the last observation or the next one.
+
+    Raises ValueError if not. Assumes observed_at is already validated.
+    """
+    prev = datetime.strptime(last_observed_mon_yr, "%d-%m-%Y")
+    new = datetime.strptime(observed_at, "%d-%m-%Y")
+    next_month = prev + relativedelta(months=1)
+
+    same_month = (new.year == prev.year and new.month == prev.month)
+    is_next_month = (new.year == next_month.year and new.month == next_month.month)
+
+    if not (same_month or is_next_month):
+        raise ValueError(
+            f'Invalid observed_at for {product_id}: {observed_at}, '
+            f'must be the same month as {last_observed_mon_yr} or the next one'
+        )
+
+    return new
