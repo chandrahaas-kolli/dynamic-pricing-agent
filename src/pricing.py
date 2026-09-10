@@ -59,5 +59,14 @@ def check_continuity(product_id, last_observed_mon_yr, observed_at):
             f'Invalid observed_at for {product_id}: {observed_at}, '
             f'must be the same month as {last_observed_mon_yr} or the next one'
         )
-
+        
     return new
+
+
+def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obs_mon_yr):
+    validate_prices(product_id, comp_prices)
+    validate_ratings(product_id, comp_ratings)
+    validate_observed_at(product_id, observed_at)
+    parsed_date = check_continuity(product_id, last_obs_mon_yr, observed_at)
+
+    return parsed_date
