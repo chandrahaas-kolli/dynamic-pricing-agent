@@ -70,3 +70,8 @@ def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obs_
     parsed_date = check_continuity(product_id, last_obs_mon_yr, observed_at)
 
     return parsed_date
+
+
+def pair_competitors(product_id, comp_prices, comp_ratings):
+    return [{"comp_price" : comp_price, "comp_rating" : comp_rating}
+            for comp_price, comp_rating in zip(comp_prices, comp_ratings)]
