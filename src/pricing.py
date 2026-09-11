@@ -75,3 +75,30 @@ def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obs_
 def pair_competitors(product_id, comp_prices, comp_ratings):
     return [{"comp_price" : comp_price, "comp_rating" : comp_rating}
             for comp_price, comp_rating in zip(comp_prices, comp_ratings)]
+
+
+def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
+    percent_diff = [(new - prev) * 100 / prev for new, prev in zip(new_comp_prices, prev_comp_prices)]
+
+    high_hits = [i for i, val in enumerate(percent_diff) if abs(val) >= 30]
+    if high_hits:
+        return {
+            "tier": "high",
+            "escalate": True,
+            "action": "trigger",
+            "triggered": [
+                {
+                    "index": i,
+                    "comp_price_new": new_comp_prices[i],
+                    "comp_price_prev": prev_comp_prices[i],
+                    "percent_change": percent_diff[i],
+                }
+                for i in high_hits
+            ],
+        }
+
+    moved = [i for i, val in enumerate(percent_diff) if abs(val) >= 2]
+    if not moved:
+        return {"tier": "low", "escalate": False, "action": "none"}
+
+    return {"tier": "low", "escalate": False, "action": "proceed", "percent_diff": percent_diff}    
