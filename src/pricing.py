@@ -126,3 +126,17 @@ def rating_gap(own_rating, comp_ratings):
     """Compute own rating minus the average of the 3 competitor ratings. Unrounded."""
     avg_rating = sum(comp_ratings) / len(comp_ratings)
     return own_rating - avg_rating
+
+
+def choose_target(gap):
+    """Decide which edge of the price band to target, based on the rating gap.
+
+    round(gap, 6) kills floating-point noise (e.g. 0.20000000000000018)
+    without changing the real 0.2 threshold.
+    """
+    if round(gap, 6) >= 0.2:
+        return "high"
+    elif round(gap, 6) <= -0.2:
+        return "low"
+    else:
+        return "mid"
