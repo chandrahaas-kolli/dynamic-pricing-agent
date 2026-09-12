@@ -101,4 +101,28 @@ def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
     if not moved:
         return {"tier": "low", "escalate": False, "action": "none"}
 
-    return {"tier": "low", "escalate": False, "action": "proceed", "percent_diff": percent_diff}    
+    return {"tier": "low", "escalate": False, "action": "proceed", "percent_diff": percent_diff}
+
+
+def build_band(comp_prices):
+    """Compute the competitor price band.
+
+    low  = cheapest competitor price
+    high = most expensive competitor price
+    mid  = midpoint of the range (not the average of all three prices)
+    """
+    low = min(comp_prices)
+    high = max(comp_prices)
+    mid = (low + high) / 2
+    band = {
+        "low": low,
+        "high": high,
+        "mid": mid,
+    }
+    return band    
+
+
+def rating_gap(own_rating, comp_ratings):
+    """Compute own rating minus the average of the 3 competitor ratings. Unrounded."""
+    avg_rating = sum(comp_ratings) / len(comp_ratings)
+    return own_rating - avg_rating
