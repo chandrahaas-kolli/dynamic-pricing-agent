@@ -140,3 +140,69 @@ def choose_target(gap):
         return "low"
     else:
         return "mid"
+
+
+def resolve_target_price(target_label, gap, band, our_rating, comp_details):
+    """Decide the target price and which competitor (if any) is already
+    accounted for, so the dominance clamp doesn't re-check it later.
+    """
+    epsilon = 0.01
+    tied_with_us = [c for c in comp_details if c["comp_rating"] == our_rating]
+    rated_above_us = [c for c in comp_details if c["comp_rating"] > our_rating]
+
+    if tied_with_us and rated_above_us:
+        the_tied_comp = tied_with_us[0]
+        cheapest_above_us = min(rated_above_us, key=lambda c: c["comp_price"])
+        if the_tied_comp["comp_price"] < cheapest_above_us["comp_price"]:
+            return the_tied_comp["comp_price"], cheapest_above_us
+        else:
+            return cheapest_above_us["comp_price"] - epsilon, cheapest_above_us
+
+    is_top_rated = not rated_above_us
+    if target_label == "high" and is_top_rated:
+        premium_pct = min(gap / 0.2, 2) * 0.05
+        return band["high"] * (1 + premium_pct), None
+
+    return band[target_label], None
+
+
+def check_move_size(target_price, anchor):
+    """Decide the path BEFORE agent.py calls the LLM or not.
+
+    escalate: target unreachable this month.
+    llm: small move, LLM decides how much of it to take now.
+    direct: 5-10% move, no LLM needed, go straight to target.
+    """
+    x_anchor = (target_price - anchor) / anchor * 100
+    if abs(x_anchor) > 10:
+        return "escalate", x_anchor
+    elif abs(x_anchor) <= 5:
+        return "llm", x_anchor
+    else:
+        return "direct", x_anchor
+
+
+def compute_step(current_price, target_price, anchor, llm_step_pct=None):
+    """Move toward target_price. llm_step_pct=None means the direct path —
+    agent.py already confirmed 5-10% is safe, so just land on target.
+    """
+    if llm_step_pct is None:
+        return target_price
+    step_dollar = llm_step_pct * anchor
+    direction = 1 if target_price > current_price else -1
+    distance = abs(target_price - current_price)
+    return current_price + direction * min(step_dollar, distance)
+
+
+def apply_dominance_clamp(new_price, our_rating, comp_details, already_cleared=None):
+    """Never land at/above a competitor rated higher than us.
+
+    already_cleared is skipped — resolve_target_price already verified it's safe.
+    """
+    epsilon = 0.01
+    for comp in comp_details:
+        if already_cleared is not None and comp is already_cleared:
+            continue
+        if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
+            new_price = comp["comp_price"] - epsilon
+    return new_price
