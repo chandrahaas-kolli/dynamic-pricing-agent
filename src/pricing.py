@@ -206,3 +206,18 @@ def apply_dominance_clamp(new_price, our_rating, comp_details, already_cleared=N
         if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
             new_price = comp["comp_price"] - epsilon
     return new_price
+
+
+def enforce_bounds(product_id, price, min_price, max_price):
+    """Clamp price to the frozen absolute floor/ceiling. Never escalates — log-only.
+
+    min_price = 1.0 x historical minimum unit_price for this product.
+    max_price = 1.2 x historical maximum unit_price for this product.
+    Both computed once from the original dataset and frozen, not recalculated.
+    """
+    if price < min_price:
+        return min_price
+    elif price > max_price:
+        return max_price
+    else:
+        return price
