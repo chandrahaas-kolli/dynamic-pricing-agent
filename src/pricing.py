@@ -63,11 +63,11 @@ def check_continuity(product_id, last_observed_mon_yr, observed_at):
     return new
 
 
-def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obs_mon_yr):
+def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_observed_mon_yr):
     validate_prices(product_id, comp_prices)
     validate_ratings(product_id, comp_ratings)
     validate_observed_at(product_id, observed_at)
-    parsed_date = check_continuity(product_id, last_obs_mon_yr, observed_at)
+    parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)
 
     return parsed_date
 
@@ -122,10 +122,10 @@ def build_band(comp_prices):
     return band    
 
 
-def rating_gap(own_rating, comp_ratings):
+def rating_gap(our_rating, comp_ratings):
     """Compute own rating minus the average of the 3 competitor ratings. Unrounded."""
     avg_rating = sum(comp_ratings) / len(comp_ratings)
-    return own_rating - avg_rating
+    return our_rating - avg_rating
 
 
 def choose_target(gap):
