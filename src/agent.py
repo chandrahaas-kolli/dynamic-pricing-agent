@@ -8,13 +8,22 @@ Flow:
     START -> validate_input -> competitor_move_check -> route on action:
         trigger -> trigger_node (placeholder, becomes escalate)
         none    -> no_action_node -> END
-        proceed -> pair_competitors -> END (later: analyze_position)
+        proceed -> pair_competitors -> analyze_position -> END
 """
 
-from langgraph.graph import StateGraph, START, END
-from src.state import PipelineState
-from src.pricing import validate_input, pair_competitors, competitor_move_check
 from typing import Dict
+
+from langgraph.graph import StateGraph, START, END
+
+from src.state import PipelineState
+from src.pricing import (
+    validate_input,
+    pair_competitors,
+    competitor_move_check,
+    build_band,
+    rating_gap,
+    choose_target,
+)
 
 
 # ---------- Nodes ----------
@@ -22,7 +31,7 @@ from typing import Dict
 # LangGraph merges that dict into the state.
 
 def validate_input_node(state: PipelineState) -> Dict:
-    """M1: validate inputs and store the parsed datetime in observed_date.
+    """Validate inputs and store the parsed datetime in observed_date.
 
     observed_at is left untouched.
     """
@@ -34,8 +43,7 @@ def validate_input_node(state: PipelineState) -> Dict:
 
 
 def competitor_move_check_node(state: PipelineState) -> Dict:
-    """
-    M2: compare new vs previous competitor prices.
+    """Compare new vs previous competitor prices.
 
     Returns the pricing function's dict directly, since its keys vary by
     outcome: 'triggered' only on trigger, 'percent_diff' only on proceed.
@@ -51,6 +59,18 @@ def pair_competitors_node(state: PipelineState) -> Dict:
         state["product_id"], state["comp_prices"], state["comp_ratings"]
     )
     return {"comp_details": comp_details}
+
+
+def analyze_position_node(state: PipelineState) -> Dict:
+    """Build the competitor price band, compute the rating gap, and choose the target.
+
+    Kept as one node: the three steps always run together with no branching.
+    Runs only on the proceed path. Requires our_rating in the state.
+    """
+    band = build_band(state["comp_prices"])
+    ratings_gap = rating_gap(state["our_rating"], state["comp_ratings"])
+    target_label = choose_target(ratings_gap)
+    return {"band": band, "gap": ratings_gap, "target_label": target_label}
 
 
 def trigger_node(state: PipelineState) -> Dict:
@@ -80,6 +100,7 @@ graph = StateGraph(PipelineState)
 graph.add_node("validate_input_node", validate_input_node)
 graph.add_node("competitor_move_check_node", competitor_move_check_node)
 graph.add_node("pair_competitors_node", pair_competitors_node)
+graph.add_node("analyze_position_node", analyze_position_node)
 graph.add_node("trigger_node", trigger_node)
 graph.add_node("no_action_node", no_action_node)
 
@@ -93,8 +114,12 @@ graph.add_conditional_edges(
     {"trigger": "trigger_node", "none": "no_action_node", "proceed": "pair_competitors_node"},
 )
 
+# Proceed path
+graph.add_edge("pair_competitors_node", "analyze_position_node")
+graph.add_edge("analyze_position_node", END)
+
+# Terminal branches
 graph.add_edge("trigger_node", END)
 graph.add_edge("no_action_node", END)
-graph.add_edge("pair_competitors_node", END)  # later: -> analyze_position_node
 
 app = graph.compile()
