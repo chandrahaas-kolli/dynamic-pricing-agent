@@ -8,7 +8,11 @@ Flow:
     START -> validate_input -> competitor_move_check -> route on action:
         trigger -> trigger_node (placeholder, becomes escalate)
         none    -> no_action_node -> END
-        proceed -> pair_competitors -> analyze_position -> END
+        proceed -> pair_competitors -> analyze_position -> resolve_target_price
+                   -> check_move_size -> route on path:
+                       escalate -> escalate_node (placeholder) -> END
+                       llm      -> llm_step_size (placeholder) -> compute_step
+                       direct   -> compute_step (placeholder) -> END
 """
 
 from typing import Dict
@@ -23,6 +27,8 @@ from src.pricing import (
     build_band,
     rating_gap,
     choose_target,
+    resolve_target_price,
+    check_move_size,
 )
 
 
@@ -73,8 +79,58 @@ def analyze_position_node(state: PipelineState) -> Dict:
     return {"band": band, "gap": ratings_gap, "target_label": target_label}
 
 
+def resolve_target_price_node(state: PipelineState) -> Dict:
+    """Set the target price and the competitor already handled, if any.
+
+    cleared_comp is set only when we are rating-tied with a competitor and
+    another is rated above us; the dominance clamp skips it later.
+    Runs only on the proceed path.
+    """
+    target_price, cleared_comp = resolve_target_price(
+        state["target_label"], state["gap"], state["band"],
+        state["our_rating"], state["comp_details"]
+    )
+    return {"target_price": target_price, "cleared_comp": cleared_comp}
+
+
+def check_move_size_node(state: PipelineState) -> Dict:
+    """Measure the target's distance from the anchor and choose the path.
+
+    path is 'escalate' (beyond the monthly cap), 'llm' (small move) or
+    'direct' (medium move). On escalate, also sets escalate=True and
+    tier='medium'. Requires anchor in the state.
+    """
+    path, x_anchor = check_move_size(state["target_price"], state["anchor"])
+    if path == "escalate":
+        return {
+            "path": path,
+            "x_anchor": x_anchor,
+            "escalate": True,
+            "tier": "medium",
+        }
+    return {"path": path, "x_anchor": x_anchor}
+
+
+def llm_step_size_node(state: PipelineState) -> Dict:
+    """Placeholder for the LLM step-size choice (llm path). Changes nothing yet."""
+    return {}
+
+
+def compute_step_node(state: PipelineState) -> Dict:
+    """Placeholder for moving the price toward the target. Changes nothing yet."""
+    return {}
+
+
 def trigger_node(state: PipelineState) -> Dict:
     """Placeholder for the escalate node (30%+ move). Changes nothing yet."""
+    return {}
+
+
+def escalate_node(state: PipelineState) -> Dict:
+    """Placeholder for escalation when the target exceeds the monthly cap.
+
+    To be merged with trigger_node once the escalate logic is built.
+    """
     return {}
 
 
@@ -93,6 +149,14 @@ def route_comp_move_check(state: PipelineState) -> str:
     raise ValueError(f"unexpected action: {state['action']}")
 
 
+def route_check_move_size(state: PipelineState) -> str:
+    """Return the branch label for the path set by the move-size check."""
+    for route in ("escalate", "llm", "direct"):
+        if state["path"] == route:
+            return route
+    raise ValueError(f"unexpected path: {state['path']}")
+
+
 # ---------- Graph wiring ----------
 
 graph = StateGraph(PipelineState)
@@ -101,7 +165,12 @@ graph.add_node("validate_input_node", validate_input_node)
 graph.add_node("competitor_move_check_node", competitor_move_check_node)
 graph.add_node("pair_competitors_node", pair_competitors_node)
 graph.add_node("analyze_position_node", analyze_position_node)
+graph.add_node("resolve_target_price_node", resolve_target_price_node)
+graph.add_node("check_move_size_node", check_move_size_node)
+graph.add_node("llm_step_size_node", llm_step_size_node)
+graph.add_node("compute_step_node", compute_step_node)
 graph.add_node("trigger_node", trigger_node)
+graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
 
 graph.add_edge(START, "validate_input_node")
@@ -116,10 +185,21 @@ graph.add_conditional_edges(
 
 # Proceed path
 graph.add_edge("pair_competitors_node", "analyze_position_node")
-graph.add_edge("analyze_position_node", END)
+graph.add_edge("analyze_position_node", "resolve_target_price_node")
+graph.add_edge("resolve_target_price_node", "check_move_size_node")
+
+graph.add_conditional_edges(
+    "check_move_size_node",
+    route_check_move_size,
+    {"escalate": "escalate_node", "llm": "llm_step_size_node", "direct": "compute_step_node"},
+)
+
+graph.add_edge("llm_step_size_node", "compute_step_node")
+graph.add_edge("compute_step_node", END)
 
 # Terminal branches
 graph.add_edge("trigger_node", END)
+graph.add_edge("escalate_node", END)
 graph.add_edge("no_action_node", END)
 
 app = graph.compile()
