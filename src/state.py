@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import TypedDict, List, Dict, Optional
 from typing_extensions import NotRequired
 
@@ -19,6 +20,7 @@ class PipelineState(TypedDict):
     cleared_comp: Optional[CompEntry]
 
     # --- optional: present only on some paths ---
+    observed_date: NotRequired[datetime]
     comp_details: NotRequired[List[CompEntry]]
     anchor: NotRequired[float]
     our_rating: NotRequired[float]

@@ -22,12 +22,15 @@ from typing import Dict
 # LangGraph merges that dict into the state.
 
 def validate_input_node(state: PipelineState) -> Dict:
-    """M1: validate inputs and replace observed_at with a parsed datetime."""
+    """M1: validate inputs and store the parsed datetime in observed_date.
+
+    observed_at is left untouched.
+    """
     parsed = validate_input(
         state["product_id"], state["comp_prices"], state["comp_ratings"],
         state["observed_at"], state["last_observed_mon_yr"]
     )
-    return {"observed_at": parsed}
+    return {"observed_date": parsed}
 
 
 def competitor_move_check_node(state: PipelineState) -> Dict:
