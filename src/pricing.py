@@ -145,6 +145,9 @@ def choose_target(gap):
 def resolve_target_price(target_label, gap, band, our_rating, comp_details):
     """Decide the target price and which competitor (if any) is already
     accounted for; cleared_comp is returned for logging and traceability.
+
+    Also returns target_source, a string naming which branch set the
+    target: "tie_match", "tie_undercut", "top_premium", or "band".
     """
     epsilon = 0.01
     tied_with_us = [c for c in comp_details if c["comp_rating"] == our_rating]
@@ -154,16 +157,16 @@ def resolve_target_price(target_label, gap, band, our_rating, comp_details):
         the_tied_comp = tied_with_us[0]
         cheapest_above_us = min(rated_above_us, key=lambda c: c["comp_price"])
         if the_tied_comp["comp_price"] < cheapest_above_us["comp_price"]:
-            return the_tied_comp["comp_price"], cheapest_above_us
+            return the_tied_comp["comp_price"], cheapest_above_us, "tie_match"
         else:
-            return cheapest_above_us["comp_price"] - epsilon, cheapest_above_us
+            return cheapest_above_us["comp_price"] - epsilon, cheapest_above_us, "tie_undercut"
 
     is_top_rated = not rated_above_us
     if target_label == "high" and is_top_rated:
         premium_pct = min(gap / 0.2, 2) * 0.05
-        return band["high"] * (1 + premium_pct), None
+        return band["high"] * (1 + premium_pct), None, "top_premium"
 
-    return band[target_label], None
+    return band[target_label], None, "band"
 
 
 def check_move_size(target_price, anchor):

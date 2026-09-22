@@ -9,10 +9,12 @@ Flow:
         trigger -> trigger_node (placeholder, becomes escalate)
         none    -> no_action_node -> END
         proceed -> pair_competitors -> analyze_position -> resolve_target_price
-                   -> check_move_size -> route on path:
+                   -> check_move_size -> route on path
+                      (llm is overridden to direct for tie targets):
                        escalate -> escalate_node (placeholder) -> END
-                       llm      -> llm_step_size (placeholder) -> compute_step -> END
-                       direct   -> compute_step -> END
+                       llm      -> llm_step_size (placeholder) -> compute_step
+                                   -> apply_dominance_clamp -> END
+                       direct   -> compute_step -> apply_dominance_clamp -> END
 """
 
 from typing import Dict
@@ -30,6 +32,7 @@ from src.pricing import (
     resolve_target_price,
     check_move_size,
     compute_step,
+    apply_dominance_clamp,
 )
 
 
@@ -85,13 +88,18 @@ def resolve_target_price_node(state: PipelineState) -> Dict:
 
     cleared_comp is set only when we are rating-tied with a competitor and
     another is rated above us; kept for logging.
+    target_source records which branch in resolve_target_price set the target.
     Runs only on the proceed path.
     """
-    target_price, cleared_comp = resolve_target_price(
+    target_price, cleared_comp, target_source = resolve_target_price(
         state["target_label"], state["gap"], state["band"],
         state["our_rating"], state["comp_details"]
     )
-    return {"target_price": target_price, "cleared_comp": cleared_comp}
+    return {
+        "target_price": target_price,
+        "cleared_comp": cleared_comp,
+        "target_source": target_source,
+    }
 
 
 def check_move_size_node(state: PipelineState) -> Dict:
@@ -100,6 +108,10 @@ def check_move_size_node(state: PipelineState) -> Dict:
     path is 'escalate' (beyond the monthly cap), 'llm' (small move) or
     'direct' (medium move). On escalate, also sets escalate=True and
     tier='medium'. Requires anchor in the state.
+
+    If path is 'llm' and target_source is 'tie_match' or 'tie_undercut',
+    path is overridden to 'direct' so the price lands exactly on the tie
+    target. Escalate is unchanged and takes priority over this override.
     """
     path, x_anchor = check_move_size(state["target_price"], state["anchor"])
     if path == "escalate":
@@ -109,6 +121,8 @@ def check_move_size_node(state: PipelineState) -> Dict:
             "escalate": True,
             "tier": "medium",
         }
+    if path == "llm" and state["target_source"] in ("tie_match", "tie_undercut"):
+        path = "direct"
     return {"path": path, "x_anchor": x_anchor}
 
 
@@ -122,13 +136,31 @@ def compute_step_node(state: PipelineState) -> Dict:
 
     llm_step_pct is set only on the llm path; on the direct path it is
     missing, so .get() returns None and the price lands on the target.
+    On the direct path llm_step_pct is ignored even if present.
     Requires current_price in the state.
     """
+    step_pct = state.get("llm_step_pct") if state["path"] == "llm" else None
     price = compute_step(
         state["current_price"], state["target_price"],
-        state["anchor"], state.get("llm_step_pct")
+        state["anchor"], step_pct
     )
     return {"price": price}
+
+
+def apply_dominance_clamp_node(state: PipelineState) -> Dict:
+    """Lower the price below any higher-rated competitor it would land at or above.
+
+    Checks every higher-rated competitor. dominance_clamped records whether
+    the price changed, so the reason survives into logging.
+    """
+    clamped_price = apply_dominance_clamp(
+        state["price"], state["our_rating"], state["comp_details"]
+    )
+    clamp_flag = clamped_price != state["price"]
+    return {
+        "price": clamped_price,
+        "dominance_clamped": clamp_flag,
+    }
 
 
 def trigger_node(state: PipelineState) -> Dict:
@@ -179,6 +211,7 @@ graph.add_node("resolve_target_price_node", resolve_target_price_node)
 graph.add_node("check_move_size_node", check_move_size_node)
 graph.add_node("llm_step_size_node", llm_step_size_node)
 graph.add_node("compute_step_node", compute_step_node)
+graph.add_node("apply_dominance_clamp_node", apply_dominance_clamp_node)
 graph.add_node("trigger_node", trigger_node)
 graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
@@ -205,7 +238,8 @@ graph.add_conditional_edges(
 )
 
 graph.add_edge("llm_step_size_node", "compute_step_node")
-graph.add_edge("compute_step_node", END)
+graph.add_edge("compute_step_node", "apply_dominance_clamp_node")
+graph.add_edge("apply_dominance_clamp_node", END)
 
 # Terminal branches
 graph.add_edge("trigger_node", END)

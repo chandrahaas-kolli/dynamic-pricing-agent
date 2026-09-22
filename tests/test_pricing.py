@@ -159,43 +159,48 @@ def test_choose_target_low():
 
 
 # --- resolve_target_price ---
-def test_resolve_target_price_tie_cheaper_than_better():
+def test_resolve_target_price_tie_pricier_than_better():
     # tied comp (95, rating 4.0) is PRICIER than the better-rated comp (90, rating 4.2)
     # -> should target just under the better-rated one: 90 - epsilon = 89.99
     band = {"low": 85, "mid": 90, "high": 95}
     comps = [{"comp_price": 90, "comp_rating": 4.2}, {"comp_price": 95, "comp_rating": 4.0}, {"comp_price": 80, "comp_rating": 3.8}]
-    target, cleared = resolve_target_price("mid", 0.0, band, 4.0, comps)
+    target, cleared, source = resolve_target_price("mid", 0.0, band, 4.0, comps)
     assert round(target, 2) == 89.99
+    assert source == "tie_undercut"
 
-def test_resolve_target_price_tie_pricier_than_better():
+def test_resolve_target_price_tie_cheaper_than_better():
     # tied comp (85, rating 4.0) is CHEAPER than the better-rated comp (98, rating 4.2)
     # -> should match the tied comp directly: 85
     band = {"low": 80, "mid": 90, "high": 100}
     comps = [{"comp_price": 98, "comp_rating": 4.2}, {"comp_price": 85, "comp_rating": 4.0}, {"comp_price": 75, "comp_rating": 3.8}]
-    target, cleared = resolve_target_price("mid", 0.0, band, 4.0, comps)
+    target, cleared, source = resolve_target_price("mid", 0.0, band, 4.0, comps)
     assert target == 85
+    assert source == "tie_match"
 
 def test_resolve_target_price_top_rated_premium():
     band = {"low": 96, "mid": 100, "high": 104}
     comps = [{"comp_price": 102, "comp_rating": 4.0}, {"comp_price": 104, "comp_rating": 3.9}, {"comp_price": 96, "comp_rating": 3.8}]
-    target, cleared = resolve_target_price("high", 0.35, band, 4.5, comps)
+    target, cleared, source = resolve_target_price("high", 0.35, band, 4.5, comps)
     assert round(target, 2) == 113.10
+    assert source == "top_premium"
 
 def test_resolve_target_price_plain_no_special_case():
     # no tie, not top-rated (a comp outranks us) -> just band[target_label]
     band = {"low": 80, "mid": 90, "high": 100}
     comps = [{"comp_price": 85, "comp_rating": 4.5}, {"comp_price": 78, "comp_rating": 3.5}, {"comp_price": 95, "comp_rating": 3.0}]
-    target, cleared = resolve_target_price("mid", 0.05, band, 4.0, comps)
+    target, cleared, source = resolve_target_price("mid", 0.05, band, 4.0, comps)
     assert target == 90
     assert cleared is None
+    assert source == "band"
 
 def test_resolve_target_price_top_rated_but_not_high_target():
     # top-rated, but target isn't "high" -> premium branch must not apply
     band = {"low": 90, "mid": 100, "high": 110}
     comps = [{"comp_price": 95, "comp_rating": 4.0}, {"comp_price": 105, "comp_rating": 3.9}, {"comp_price": 90, "comp_rating": 3.8}]
-    target, cleared = resolve_target_price("mid", 0.3, band, 4.5, comps)
+    target, cleared, source = resolve_target_price("mid", 0.3, band, 4.5, comps)
     assert target == 100
     assert cleared is None
+    assert source == "band"
 
 
 # --- check_move_size ---
