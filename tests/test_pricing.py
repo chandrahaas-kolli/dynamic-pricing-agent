@@ -244,12 +244,12 @@ def test_apply_dominance_clamp_fires():
     result = apply_dominance_clamp(104, 3.95, comps)
     assert round(result, 2) == 101.99
 
-def test_apply_dominance_clamp_skips_cleared():
-    # new_price (99) >= comp_price (98), so without the already_cleared skip
-    # this WOULD clamp to 97.99 -- proves the skip is actually doing something
+def test_apply_dominance_clamp_no_skip_for_cleared_comp():
+    # cleared_comp is now for logging only -- the clamp checks every
+    # higher-rated competitor, so a price at/above it still gets clamped
     comps = [{"comp_price": 98, "comp_rating": 4.2}]
-    result = apply_dominance_clamp(99, 4.0, comps, already_cleared=comps[0])
-    assert result == 99
+    result = apply_dominance_clamp(99, 4.0, comps)
+    assert round(result, 2) == 97.99
 
 
 # --- enforce_bounds ---

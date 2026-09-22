@@ -11,8 +11,8 @@ Flow:
         proceed -> pair_competitors -> analyze_position -> resolve_target_price
                    -> check_move_size -> route on path:
                        escalate -> escalate_node (placeholder) -> END
-                       llm      -> llm_step_size (placeholder) -> compute_step
-                       direct   -> compute_step (placeholder) -> END
+                       llm      -> llm_step_size (placeholder) -> compute_step -> END
+                       direct   -> compute_step -> END
 """
 
 from typing import Dict
@@ -29,6 +29,7 @@ from src.pricing import (
     choose_target,
     resolve_target_price,
     check_move_size,
+    compute_step,
 )
 
 
@@ -83,7 +84,7 @@ def resolve_target_price_node(state: PipelineState) -> Dict:
     """Set the target price and the competitor already handled, if any.
 
     cleared_comp is set only when we are rating-tied with a competitor and
-    another is rated above us; the dominance clamp skips it later.
+    another is rated above us; kept for logging.
     Runs only on the proceed path.
     """
     target_price, cleared_comp = resolve_target_price(
@@ -117,8 +118,17 @@ def llm_step_size_node(state: PipelineState) -> Dict:
 
 
 def compute_step_node(state: PipelineState) -> Dict:
-    """Placeholder for moving the price toward the target. Changes nothing yet."""
-    return {}
+    """Move the price toward the target and store it in price.
+
+    llm_step_pct is set only on the llm path; on the direct path it is
+    missing, so .get() returns None and the price lands on the target.
+    Requires current_price in the state.
+    """
+    price = compute_step(
+        state["current_price"], state["target_price"],
+        state["anchor"], state.get("llm_step_pct")
+    )
+    return {"price": price}
 
 
 def trigger_node(state: PipelineState) -> Dict:

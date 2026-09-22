@@ -144,7 +144,7 @@ def choose_target(gap):
 
 def resolve_target_price(target_label, gap, band, our_rating, comp_details):
     """Decide the target price and which competitor (if any) is already
-    accounted for, so the dominance clamp doesn't re-check it later.
+    accounted for; cleared_comp is returned for logging and traceability.
     """
     epsilon = 0.01
     tied_with_us = [c for c in comp_details if c["comp_rating"] == our_rating]
@@ -194,15 +194,13 @@ def compute_step(current_price, target_price, anchor, llm_step_pct=None):
     return current_price + direction * min(step_dollar, distance)
 
 
-def apply_dominance_clamp(new_price, our_rating, comp_details, already_cleared=None):
+def apply_dominance_clamp(new_price, our_rating, comp_details):
     """Never land at/above a competitor rated higher than us.
 
-    already_cleared is skipped — resolve_target_price already verified it's safe.
+    Checks every higher-rated competitor, no skip.
     """
     epsilon = 0.01
     for comp in comp_details:
-        if already_cleared is not None and comp is already_cleared:
-            continue
         if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
             new_price = comp["comp_price"] - epsilon
     return new_price
