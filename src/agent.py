@@ -6,15 +6,17 @@ graph nodes and wires them together in execution order.
 
 Flow:
     START -> validate_input -> competitor_move_check -> route on action:
-        trigger -> escalate_node (escalation_cause=competitor_move) -> END
-        none    -> no_action_node -> END
+        trigger -> escalate_node (escalation_cause=competitor_move) -> reason -> END
+        none    -> no_action_node -> reason -> END
         proceed -> pair_competitors -> analyze_position -> resolve_target_price
                    -> check_move_size -> route on path
                       (llm is overridden to direct for tie targets):
-                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> END
+                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> END
                        llm      -> llm_step_size (placeholder) -> compute_step
-                                   -> apply_dominance_clamp -> enforce_bounds -> END
-                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> END
+                                   -> apply_dominance_clamp -> enforce_bounds -> reason -> END
+                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> END
+
+A persist node will later sit between reason and END on every path.
 """
 
 from typing import Dict
@@ -220,8 +222,77 @@ def escalate_node(state: PipelineState) -> Dict:
 
 
 def no_action_node(state: PipelineState) -> Dict:
-    """Move below deadband: nothing to do, run ends here."""
+    """Move below deadband: nothing to price; goes to reason."""
     return {}
+
+
+def reason_node(state: PipelineState) -> Dict:
+    """Compose a deterministic, LLM-free explanation of the outcome.
+
+    Runs on every path (escalated, no-change, and priced) as the graph's
+    last node. Checked in order: escalation_cause (competitor_move or
+    cap_exceeded escalation text, or ValueError on any other cause that is
+    present), then action == 'none' (below the deadband), then the priced
+    case (direct/llm paths) — which explains target_source and appends
+    clauses for any partial step or clamp that fired. Invalid input never
+    reaches here, since validate_input raises before any node runs.
+    """
+    cause = state.get("escalation_cause")
+    if cause == "competitor_move":
+        triggered = state["triggered"]
+        text = f"Escalated (high): {len(triggered)} competitor(s) moved 30% or more in one observation."
+        return {"reason": text}
+    elif cause == "cap_exceeded":
+        target_price = state["target_price"]
+        x_anchor = state["x_anchor"]
+        anchor = state["anchor"]
+        text = f"Escalated (medium): target {target_price:.2f} is {x_anchor:+.1f}% from anchor {anchor:.2f}, beyond the ±10% monthly cap."
+        return {"reason": text}
+    elif cause is not None:
+        raise ValueError(f"unexpected escalation_cause: {cause}")
+    elif state["action"] == "none":
+        return {"reason": "No change: competitor moves below the 2% deadband."}
+
+    price = state["price"]
+    current_price = state["current_price"]
+    target_price = state["target_price"]
+    target_label = state["target_label"]
+    target_source = state["target_source"]
+    cleared_comp = state["cleared_comp"]
+    path = state["path"]
+    dominance_clamped = state["dominance_clamped"]
+    bounds_clamped = state["bounds_clamped"]
+    min_price = state["min_price"]
+    max_price = state["max_price"]
+
+    if round(price, 2) == round(current_price, 2):
+        text = f"No change: price stays at {price:.2f}."
+    elif target_source == "band":
+        text = f"Priced at {price:.2f}: target is the {target_label} of the competitor band ({target_price:.2f})."
+    elif target_source == "tie_match":
+        text = f"Priced at {price:.2f}: target matches an equally rated competitor at {target_price:.2f}."
+    elif target_source == "tie_undercut":
+        text = f"Priced at {price:.2f}: target undercuts the cheapest higher-rated competitor at {cleared_comp['comp_price']:.2f}."
+    elif target_source == "top_premium":
+        text = f"Priced at {price:.2f}: target is a top-rated premium over the band high ({target_price:.2f})."
+    else:
+        raise ValueError(f"unexpected target_source: {target_source}")
+
+    clauses = []
+    if path == "llm" and round(price, 2) != round(target_price, 2) and not dominance_clamped and not bounds_clamped:
+        clauses.append(f"Partial step toward {target_price:.2f}.")
+    if dominance_clamped and not (bounds_clamped and price == min_price):
+        clauses.append("Clamped below a higher-rated competitor.")
+    if bounds_clamped and price == min_price:
+        clauses.append(f"Raised to the floor {min_price:.2f}.")
+    if bounds_clamped and price == max_price:
+        clauses.append(f"Lowered to the ceiling {max_price:.2f}.")
+    if dominance_clamped and bounds_clamped and price == min_price:
+        clauses.append("Floor overrode the dominance clamp.")
+
+    if clauses:
+        text = text + " " + " ".join(clauses)
+    return {"reason": text}
 
 
 # ---------- Routing ----------
@@ -258,6 +329,7 @@ graph.add_node("apply_dominance_clamp_node", apply_dominance_clamp_node)
 graph.add_node("enforce_bounds_node", enforce_bounds_node)
 graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
+graph.add_node("reason_node", reason_node)
 
 graph.add_edge(START, "validate_input_node")
 graph.add_edge("validate_input_node", "competitor_move_check_node")
@@ -283,10 +355,12 @@ graph.add_conditional_edges(
 graph.add_edge("llm_step_size_node", "compute_step_node")
 graph.add_edge("compute_step_node", "apply_dominance_clamp_node")
 graph.add_edge("apply_dominance_clamp_node", "enforce_bounds_node")
-graph.add_edge("enforce_bounds_node", END)
+graph.add_edge("enforce_bounds_node", "reason_node")
 
-# Terminal branches
-graph.add_edge("escalate_node", END)
-graph.add_edge("no_action_node", END)
+# Branches into reason
+graph.add_edge("escalate_node", "reason_node")
+graph.add_edge("no_action_node", "reason_node")
+
+graph.add_edge("reason_node", END)
 
 app = graph.compile()
