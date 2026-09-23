@@ -156,10 +156,10 @@ def resolve_target_price(target_label, gap, band, our_rating, comp_details):
     rated_above_us = [c for c in comp_details if c["comp_rating"] > our_rating]
 
     if tied_with_us and rated_above_us:
-        the_tied_comp = tied_with_us[0]
+        highest_tied = max(tied_with_us, key=lambda c: c["comp_price"])
         cheapest_above_us = min(rated_above_us, key=lambda c: c["comp_price"])
-        if the_tied_comp["comp_price"] < cheapest_above_us["comp_price"]:
-            return the_tied_comp["comp_price"], cheapest_above_us, "tie_match"
+        if highest_tied["comp_price"] < cheapest_above_us["comp_price"]:
+            return highest_tied["comp_price"], cheapest_above_us, "tie_match"
         else:
             return cheapest_above_us["comp_price"] - epsilon, cheapest_above_us, "tie_undercut"
 

@@ -205,6 +205,31 @@ def test_resolve_target_price_plain_no_special_case():
     assert cleared is None
     assert source == "band"
 
+def test_resolve_target_price_multi_tie_undercut():
+    comp_details = pair_competitors("g4", [45, 30, 50], [4.5, 4.0, 4.0])
+    band = {"low": 30, "mid": 40, "high": 50}
+    target, cleared, source = resolve_target_price("mid", 0.0, band, 4.0, comp_details)
+    assert round(target, 2) == 44.99
+    assert cleared == {"comp_price": 45, "comp_rating": 4.5}
+    assert source == "tie_undercut"
+
+def test_resolve_target_price_multi_tie_undercut_order_independent():
+    # same prices/ratings as above, reordered -> same result
+    comp_details = pair_competitors("g4", [45, 50, 30], [4.5, 4.0, 4.0])
+    band = {"low": 30, "mid": 40, "high": 50}
+    target, cleared, source = resolve_target_price("mid", 0.0, band, 4.0, comp_details)
+    assert round(target, 2) == 44.99
+    assert cleared == {"comp_price": 45, "comp_rating": 4.5}
+    assert source == "tie_undercut"
+
+def test_resolve_target_price_multi_tie_match():
+    comp_details = pair_competitors("g4", [45, 30, 40], [4.5, 4.0, 4.0])
+    band = {"low": 30, "mid": 37.5, "high": 45}
+    target, cleared, source = resolve_target_price("mid", 0.0, band, 4.0, comp_details)
+    assert target == 40
+    assert cleared == {"comp_price": 45, "comp_rating": 4.5}
+    assert source == "tie_match"
+
 def test_resolve_target_price_top_rated_but_not_high_target():
     # top-rated, but target isn't "high" -> premium branch must not apply
     band = {"low": 90, "mid": 100, "high": 110}
