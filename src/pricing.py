@@ -63,10 +63,12 @@ def check_continuity(product_id, last_observed_mon_yr, observed_at):
     return new
 
 
-def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_observed_mon_yr):
+def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_observed_mon_yr, prev_comp_prices):
     validate_prices(product_id, comp_prices)
+    validate_prices(product_id, prev_comp_prices)
     validate_ratings(product_id, comp_ratings)
     validate_observed_at(product_id, observed_at)
+    validate_observed_at(product_id, last_observed_mon_yr)
     parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)
 
     return parsed_date
@@ -198,7 +200,8 @@ def compute_step(current_price, target_price, anchor, llm_step_pct=None):
 
 
 def apply_dominance_clamp(new_price, our_rating, comp_details):
-    """Never land at/above a competitor rated higher than us.
+    """Never land at/above a competitor rated higher than us, unless the absolute
+    floor overrides it (see enforce_bounds).
 
     Checks every higher-rated competitor, no skip.
     """

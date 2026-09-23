@@ -13,8 +13,8 @@ Flow:
                       (llm is overridden to direct for tie targets):
                        escalate -> escalate_node (placeholder) -> END
                        llm      -> llm_step_size (placeholder) -> compute_step
-                                   -> apply_dominance_clamp -> END
-                       direct   -> compute_step -> apply_dominance_clamp -> END
+                                   -> apply_dominance_clamp -> enforce_bounds -> END
+                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> END
 """
 
 from typing import Dict
@@ -33,6 +33,7 @@ from src.pricing import (
     check_move_size,
     compute_step,
     apply_dominance_clamp,
+    enforce_bounds,
 )
 
 
@@ -47,7 +48,7 @@ def validate_input_node(state: PipelineState) -> Dict:
     """
     parsed = validate_input(
         state["product_id"], state["comp_prices"], state["comp_ratings"],
-        state["observed_at"], state["last_observed_mon_yr"]
+        state["observed_at"], state["last_observed_mon_yr"], state["prev_comp_prices"]
     )
     return {"observed_date": parsed}
 
@@ -163,6 +164,21 @@ def apply_dominance_clamp_node(state: PipelineState) -> Dict:
     }
 
 
+def enforce_bounds_node(state: PipelineState) -> Dict:
+    """Clamp price to the frozen floor/ceiling; bounds win over the dominance
+    clamp if they conflict. bounds_clamped records whether it fired.
+
+    Requires min_price and max_price in the state.
+    """
+    bounded_price = enforce_bounds(
+        state["product_id"], state["price"], state["min_price"], state["max_price"]
+    )
+    return {
+        "price": bounded_price,
+        "bounds_clamped": bounded_price != state["price"],
+    }
+
+
 def trigger_node(state: PipelineState) -> Dict:
     """Placeholder for the escalate node (30%+ move). Changes nothing yet."""
     return {}
@@ -212,6 +228,7 @@ graph.add_node("check_move_size_node", check_move_size_node)
 graph.add_node("llm_step_size_node", llm_step_size_node)
 graph.add_node("compute_step_node", compute_step_node)
 graph.add_node("apply_dominance_clamp_node", apply_dominance_clamp_node)
+graph.add_node("enforce_bounds_node", enforce_bounds_node)
 graph.add_node("trigger_node", trigger_node)
 graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
@@ -239,7 +256,8 @@ graph.add_conditional_edges(
 
 graph.add_edge("llm_step_size_node", "compute_step_node")
 graph.add_edge("compute_step_node", "apply_dominance_clamp_node")
-graph.add_edge("apply_dominance_clamp_node", END)
+graph.add_edge("apply_dominance_clamp_node", "enforce_bounds_node")
+graph.add_edge("enforce_bounds_node", END)
 
 # Terminal branches
 graph.add_edge("trigger_node", END)
