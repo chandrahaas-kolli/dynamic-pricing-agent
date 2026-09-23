@@ -6,12 +6,12 @@ graph nodes and wires them together in execution order.
 
 Flow:
     START -> validate_input -> competitor_move_check -> route on action:
-        trigger -> trigger_node (placeholder, becomes escalate)
+        trigger -> escalate_node (escalation_cause=competitor_move) -> END
         none    -> no_action_node -> END
         proceed -> pair_competitors -> analyze_position -> resolve_target_price
                    -> check_move_size -> route on path
                       (llm is overridden to direct for tie targets):
-                       escalate -> escalate_node (placeholder) -> END
+                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> END
                        llm      -> llm_step_size (placeholder) -> compute_step
                                    -> apply_dominance_clamp -> enforce_bounds -> END
                        direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> END
@@ -58,10 +58,14 @@ def competitor_move_check_node(state: PipelineState) -> Dict:
 
     Returns the pricing function's dict directly, since its keys vary by
     outcome: 'triggered' only on trigger, 'percent_diff' only on proceed.
+    On trigger, also sets escalation_cause='competitor_move'.
     """
-    return competitor_move_check(
+    result = competitor_move_check(
         state["product_id"], state["comp_prices"], state["prev_comp_prices"]
     )
+    if result["action"] == "trigger":
+        result["escalation_cause"] = "competitor_move"
+    return result
 
 
 def pair_competitors_node(state: PipelineState) -> Dict:
@@ -107,8 +111,9 @@ def check_move_size_node(state: PipelineState) -> Dict:
     """Measure the target's distance from the anchor and choose the path.
 
     path is 'escalate' (beyond the monthly cap), 'llm' (small move) or
-    'direct' (medium move). On escalate, also sets escalate=True and
-    tier='medium'. Requires anchor in the state.
+    'direct' (medium move). On escalate, also sets escalate=True,
+    tier='medium', and escalation_cause='cap_exceeded'. Requires anchor in
+    the state.
 
     If path is 'llm' and target_source is 'tie_match' or 'tie_undercut',
     path is overridden to 'direct' so the price lands exactly on the tie
@@ -121,6 +126,7 @@ def check_move_size_node(state: PipelineState) -> Dict:
             "x_anchor": x_anchor,
             "escalate": True,
             "tier": "medium",
+            "escalation_cause": "cap_exceeded",
         }
     if path == "llm" and state["target_source"] in ("tie_match", "tie_undercut"):
         path = "direct"
@@ -179,17 +185,38 @@ def enforce_bounds_node(state: PipelineState) -> Dict:
     }
 
 
-def trigger_node(state: PipelineState) -> Dict:
-    """Placeholder for the escalate node (30%+ move). Changes nothing yet."""
-    return {}
-
-
 def escalate_node(state: PipelineState) -> Dict:
-    """Placeholder for escalation when the target exceeds the monthly cap.
+    """Merged escalation for competitor_move and cap_exceeded.
 
-    To be merged with trigger_node once the escalate logic is built.
+    Decides the detail_pack and whether a brief is needed by
+    escalation_cause, and for competitor_move, further by len(triggered)
+    (2+ simultaneous triggers -> needs_brief). The llm_failed cause is added
+    with the LLM step-size node; brief is filled in once escalation briefs
+    are built.
     """
-    return {}
+    cause = state.get("escalation_cause")
+    if cause == "competitor_move":
+        triggered = state["triggered"]
+        detail_pack = {
+            "triggered": triggered,
+            "comp_prices": state["comp_prices"],
+            "prev_comp_prices": state["prev_comp_prices"],
+        }
+        needs_brief = len(triggered) >= 2
+    elif cause == "cap_exceeded":
+        detail_pack = {
+            "target_price": state["target_price"],
+            "target_source": state["target_source"],
+            "anchor": state["anchor"],
+            "x_anchor": state["x_anchor"],
+            "current_price": state["current_price"],
+            "band": state["band"],
+            "gap": state["gap"],
+        }
+        needs_brief = True
+    else:
+        raise ValueError(f"unexpected escalation_cause: {cause}")
+    return {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
 
 
 def no_action_node(state: PipelineState) -> Dict:
@@ -229,7 +256,6 @@ graph.add_node("llm_step_size_node", llm_step_size_node)
 graph.add_node("compute_step_node", compute_step_node)
 graph.add_node("apply_dominance_clamp_node", apply_dominance_clamp_node)
 graph.add_node("enforce_bounds_node", enforce_bounds_node)
-graph.add_node("trigger_node", trigger_node)
 graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
 
@@ -240,7 +266,7 @@ graph.add_edge("validate_input_node", "competitor_move_check_node")
 graph.add_conditional_edges(
     "competitor_move_check_node",
     route_comp_move_check,
-    {"trigger": "trigger_node", "none": "no_action_node", "proceed": "pair_competitors_node"},
+    {"trigger": "escalate_node", "none": "no_action_node", "proceed": "pair_competitors_node"},
 )
 
 # Proceed path
@@ -260,7 +286,6 @@ graph.add_edge("apply_dominance_clamp_node", "enforce_bounds_node")
 graph.add_edge("enforce_bounds_node", END)
 
 # Terminal branches
-graph.add_edge("trigger_node", END)
 graph.add_edge("escalate_node", END)
 graph.add_edge("no_action_node", END)
 

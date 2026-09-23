@@ -44,3 +44,7 @@ class PipelineState(TypedDict):
     bounds_clamped: NotRequired[bool]
     min_price: NotRequired[float]
     max_price: NotRequired[float]
+    escalation_cause: NotRequired[str]
+    detail_pack: NotRequired[Dict]
+    needs_brief: NotRequired[bool]
+    brief: NotRequired[Optional[str]]
