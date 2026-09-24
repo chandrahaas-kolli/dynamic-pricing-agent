@@ -3,3 +3,4 @@ pytest
 python-dotenv
 python-dateutil
 langgraph
+python-dotenv==1.2.3
