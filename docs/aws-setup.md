@@ -10,8 +10,8 @@ What you need in AWS to run this project, and the practices it assumes.
 
 ## Region and model
 - Region: `us-east-1`.
-- Model: Claude Sonnet 5, called through the US inference profile
-  `us.anthropic.claude-sonnet-5`. The `us.` profile keeps requests within US regions.
+- Model: Claude Sonnet 4.6, called through the US inference profile
+  `us.anthropic.claude-sonnet-4-6`. The `us.` profile keeps requests within US regions.
 
 ## Credentials
 - Use short-lived credentials; do not create long-term access keys.
@@ -30,7 +30,7 @@ the profile and the underlying foundation model.
 ## Verify Bedrock access
 ```bash
 aws bedrock-runtime converse \
-  --model-id us.anthropic.claude-sonnet-5 \
+  --model-id us.anthropic.claude-sonnet-4-6 \
   --messages '[{"role":"user","content":[{"text":"Reply with OK"}]}]' \
   --region us-east-1 \
   --profile <your-profile>
