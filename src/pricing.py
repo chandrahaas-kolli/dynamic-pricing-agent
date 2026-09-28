@@ -199,17 +199,48 @@ def compute_step(current_price, target_price, anchor, llm_step_pct=None):
     return current_price + direction * min(step_dollar, distance)
 
 
-def apply_dominance_clamp(new_price, our_rating, comp_details):
-    """Never land at/above a competitor rated higher than us, unless the absolute
-    floor overrides it (see enforce_bounds).
+def apply_dominance_clamp(new_price, our_rating, comp_details, direction):
+    """Keep the price on the correct side of same-direction-relevant competitors,
+    unless the absolute floor/ceiling overrides it (see enforce_bounds).
 
-    Checks every higher-rated competitor, no skip.
+    Moving up (direction > 0): never land at/above a competitor rated higher
+    than us -- clamp to comp_price - epsilon. Checks every higher-rated
+    competitor, no skip.
+
+    Moving down (direction < 0): never land at/below a competitor rated lower
+    than us -- clamp to comp_price + epsilon. Checks every lower-rated
+    competitor, no skip. Then, if the price is still at/above any competitor
+    rated higher than us, clamp to (the lowest such higher-rated price) -
+    epsilon; the higher-rated rule always wins this conflict. The price may
+    land on either side of current_price.
+
+    No move (direction == 0): neither rule applies, price is returned
+    unchanged.
+
+    direction is the sign of this step's price movement (current_price to
+    the pre-clamp new_price), supplied by the caller.
+
+    Returns (price, side): side is "below_higher_rated", "above_lower_rated",
+    or None if the price did not change. The conflict case reports
+    "below_higher_rated".
     """
     epsilon = 0.01
-    for comp in comp_details:
-        if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
-            new_price = comp["comp_price"] - epsilon
-    return new_price
+    side = None
+    if direction > 0:
+        for comp in comp_details:
+            if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
+                new_price = comp["comp_price"] - epsilon
+                side = "below_higher_rated"
+    elif direction < 0:
+        for comp in comp_details:
+            if comp["comp_rating"] < our_rating and new_price <= comp["comp_price"]:
+                new_price = comp["comp_price"] + epsilon
+                side = "above_lower_rated"
+        for comp in comp_details:
+            if comp["comp_rating"] > our_rating and new_price >= comp["comp_price"]:
+                new_price = comp["comp_price"] - epsilon
+                side = "below_higher_rated"
+    return new_price, side
 
 
 def enforce_bounds(product_id, price, min_price, max_price):

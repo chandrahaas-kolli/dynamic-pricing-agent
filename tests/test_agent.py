@@ -1,5 +1,8 @@
 import pytest
-from src.agent import app, escalate_node, competitor_move_check_node, check_move_size_node, reason_node
+from src.agent import (
+    app, escalate_node, competitor_move_check_node, check_move_size_node,
+    reason_node, apply_dominance_clamp_node,
+)
 
 
 # --- escalate_node ---
@@ -142,12 +145,45 @@ def _priced_state(**overrides):
         "cleared_comp": None,
         "path": "direct",
         "dominance_clamped": False,
+        "dominance_side": None,
         "bounds_clamped": False,
         "min_price": 1,
         "max_price": 1000,
     }
     state.update(overrides)
     return state
+
+
+# --- apply_dominance_clamp_node ---
+def test_apply_dominance_clamp_node_downward_above_lower_rated():
+    state = {
+        "price": 102, "current_price": 105, "our_rating": 4.0,
+        "comp_details": [{"comp_price": 103, "comp_rating": 3.5}],
+    }
+    result = apply_dominance_clamp_node(state)
+    assert round(result["price"], 2) == 103.01
+    assert result["dominance_clamped"] is True
+    assert result["dominance_side"] == "above_lower_rated"
+
+def test_apply_dominance_clamp_node_upward_below_higher_rated():
+    state = {
+        "price": 104, "current_price": 100, "our_rating": 4.0,
+        "comp_details": [{"comp_price": 102, "comp_rating": 4.5}],
+    }
+    result = apply_dominance_clamp_node(state)
+    assert round(result["price"], 2) == 101.99
+    assert result["dominance_clamped"] is True
+    assert result["dominance_side"] == "below_higher_rated"
+
+def test_apply_dominance_clamp_node_no_move():
+    state = {
+        "price": 100, "current_price": 100, "our_rating": 4.0,
+        "comp_details": [{"comp_price": 102, "comp_rating": 4.5}],
+    }
+    result = apply_dominance_clamp_node(state)
+    assert result["price"] == 100
+    assert result["dominance_clamped"] is False
+    assert result["dominance_side"] is None
 
 def test_reason_node_competitor_move_two_triggered():
     state = {
@@ -218,13 +254,13 @@ def test_reason_node_llm_partial_step():
 
 def test_reason_node_llm_with_clamp_no_partial():
     state = _priced_state(path="llm", price=97.99, current_price=105, target_price=96, target_source="tie_match",
-                           dominance_clamped=True)
+                           dominance_clamped=True, dominance_side="below_higher_rated")
     result = reason_node(state)
     assert "Partial step toward" not in result["reason"]
 
 def test_reason_node_dominance_clamp_only():
     state = _priced_state(price=101.99, current_price=100, target_price=104, target_source="band",
-                           dominance_clamped=True, bounds_clamped=False, path="direct")
+                           dominance_clamped=True, dominance_side="below_higher_rated", bounds_clamped=False, path="direct")
     result = reason_node(state)
     assert "Clamped below a higher-rated competitor" in result["reason"]
 
@@ -236,11 +272,31 @@ def test_reason_node_ceiling_clamp():
 
 def test_reason_node_floor_overrides_dominance():
     state = _priced_state(price=1, current_price=105, target_price=96, target_source="tie_match",
-                           dominance_clamped=True, bounds_clamped=True, min_price=1, max_price=1000)
+                           dominance_clamped=True, dominance_side="below_higher_rated", bounds_clamped=True,
+                           min_price=1, max_price=1000)
     result = reason_node(state)
     assert "Raised to the floor" in result["reason"]
     assert "Floor overrode the dominance clamp" in result["reason"]
     assert "Clamped below" not in result["reason"]
+
+def test_reason_node_dominance_clamp_above_lower_rated():
+    state = _priced_state(price=90.01, current_price=88, target_price=90, target_source="band",
+                           dominance_clamped=True, dominance_side="above_lower_rated", bounds_clamped=False)
+    result = reason_node(state)
+    assert "Clamped above a lower-rated competitor." in result["reason"]
+
+def test_reason_node_ceiling_overrides_dominance():
+    state = _priced_state(price=55, current_price=40, target_price=60, target_source="band",
+                           dominance_clamped=True, dominance_side="above_lower_rated", bounds_clamped=True,
+                           min_price=1, max_price=55)
+    result = reason_node(state)
+    assert "Ceiling overrode the dominance clamp." in result["reason"]
+    assert "Clamped" not in result["reason"]
+
+def test_reason_node_unknown_dominance_side():
+    state = _priced_state(dominance_clamped=True, dominance_side="sideways")
+    with pytest.raises(ValueError):
+        reason_node(state)
 
 def test_reason_node_epsilon_formatting():
     state = _priced_state(price=45 - 0.01, current_price=44, target_price=45 - 0.01, target_source="tie_undercut",

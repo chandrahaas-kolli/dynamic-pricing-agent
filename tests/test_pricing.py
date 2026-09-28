@@ -283,15 +283,83 @@ def test_compute_step_llm_overshoot_clamps_to_target():
 # --- apply_dominance_clamp ---
 def test_apply_dominance_clamp_fires():
     comps = [{"comp_price": 102, "comp_rating": 4.0}]
-    result = apply_dominance_clamp(104, 3.95, comps)
-    assert round(result, 2) == 101.99
+    price, side = apply_dominance_clamp(104, 3.95, comps, direction=1)
+    assert round(price, 2) == 101.99
+    assert side == "below_higher_rated"
 
 def test_apply_dominance_clamp_no_skip_for_cleared_comp():
     # cleared_comp is now for logging only -- the clamp checks every
     # higher-rated competitor, so a price at/above it still gets clamped
     comps = [{"comp_price": 98, "comp_rating": 4.2}]
-    result = apply_dominance_clamp(99, 4.0, comps)
-    assert round(result, 2) == 97.99
+    price, side = apply_dominance_clamp(99, 4.0, comps, direction=1)
+    assert round(price, 2) == 97.99
+    assert side == "below_higher_rated"
+
+def test_apply_dominance_clamp_downward_past_one_lower_rated():
+    comps = [{"comp_price": 90, "comp_rating": 3.8}]
+    price, side = apply_dominance_clamp(88, 4.0, comps, direction=-1)
+    assert round(price, 2) == 90.01
+    assert side == "above_lower_rated"
+
+def test_apply_dominance_clamp_downward_two_lower_rated_order_a():
+    comps = [
+        {"comp_price": 90, "comp_rating": 3.8},
+        {"comp_price": 95, "comp_rating": 3.5},
+    ]
+    price, side = apply_dominance_clamp(80, 4.0, comps, direction=-1)
+    assert round(price, 2) == 95.01
+    assert side == "above_lower_rated"
+
+def test_apply_dominance_clamp_downward_two_lower_rated_order_b():
+    comps = [
+        {"comp_price": 95, "comp_rating": 3.5},
+        {"comp_price": 90, "comp_rating": 3.8},
+    ]
+    price, side = apply_dominance_clamp(80, 4.0, comps, direction=-1)
+    assert round(price, 2) == 95.01
+    assert side == "above_lower_rated"
+
+def test_apply_dominance_clamp_upward_ignores_lower_rated():
+    comps = [{"comp_price": 90, "comp_rating": 3.8}]
+    price, side = apply_dominance_clamp(95, 4.0, comps, direction=1)
+    assert price == 95
+    assert side is None
+
+def test_apply_dominance_clamp_downward_ignores_higher_rated():
+    comps = [{"comp_price": 102, "comp_rating": 4.2}]
+    price, side = apply_dominance_clamp(99, 4.0, comps, direction=-1)
+    assert price == 99
+    assert side is None
+
+def test_apply_dominance_clamp_no_move_returns_unchanged():
+    comps = [
+        {"comp_price": 90, "comp_rating": 3.8},
+        {"comp_price": 102, "comp_rating": 4.2},
+    ]
+    price, side = apply_dominance_clamp(99, 4.0, comps, direction=0)
+    assert price == 99
+    assert side is None
+
+def test_apply_dominance_clamp_downward_conflict_higher_rated_wins():
+    comps = [
+        {"comp_price": 99, "comp_rating": 3.5},
+        {"comp_price": 98, "comp_rating": 4.5},
+    ]
+    price, side = apply_dominance_clamp(96, 4.0, comps, direction=-1)
+    assert round(price, 2) == 97.99
+    assert side == "below_higher_rated"
+
+def test_apply_dominance_clamp_downward_no_conflict():
+    comps = [{"comp_price": 99, "comp_rating": 3.5}]
+    price, side = apply_dominance_clamp(96, 4.0, comps, direction=-1)
+    assert round(price, 2) == 99.01
+    assert side == "above_lower_rated"
+
+def test_apply_dominance_clamp_downward_reversal_past_current_price():
+    comps = [{"comp_price": 101, "comp_rating": 3.5}]
+    price, side = apply_dominance_clamp(98, 4.0, comps, direction=-1)
+    assert round(price, 2) == 101.01
+    assert side == "above_lower_rated"
 
 
 # --- enforce_bounds ---

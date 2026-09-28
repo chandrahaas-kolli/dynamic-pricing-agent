@@ -157,18 +157,24 @@ def compute_step_node(state: PipelineState) -> Dict:
 
 
 def apply_dominance_clamp_node(state: PipelineState) -> Dict:
-    """Lower the price below any higher-rated competitor it would land at or above.
+    """Push the price back on the correct side of same-direction-relevant
+    competitors: below higher-rated ones moving up, above lower-rated ones
+    moving down.
 
-    Checks every higher-rated competitor. dominance_clamped records whether
-    the price changed, so the reason survives into logging.
+    direction is the sign of price minus current_price. dominance_clamped
+    records whether the price changed; dominance_side records which rule
+    fired ("below_higher_rated" or "above_lower_rated").
     """
-    clamped_price = apply_dominance_clamp(
-        state["price"], state["our_rating"], state["comp_details"]
+    diff = state["price"] - state["current_price"]
+    direction = 1 if diff > 0 else -1 if diff < 0 else 0
+    clamped_price, side = apply_dominance_clamp(
+        state["price"], state["our_rating"], state["comp_details"], direction
     )
     clamp_flag = clamped_price != state["price"]
     return {
         "price": clamped_price,
         "dominance_clamped": clamp_flag,
+        "dominance_side": side,
     }
 
 
@@ -261,6 +267,7 @@ def reason_node(state: PipelineState) -> Dict:
     cleared_comp = state["cleared_comp"]
     path = state["path"]
     dominance_clamped = state["dominance_clamped"]
+    dominance_side = state["dominance_side"]
     bounds_clamped = state["bounds_clamped"]
     min_price = state["min_price"]
     max_price = state["max_price"]
@@ -281,14 +288,21 @@ def reason_node(state: PipelineState) -> Dict:
     clauses = []
     if path == "llm" and round(price, 2) != round(target_price, 2) and not dominance_clamped and not bounds_clamped:
         clauses.append(f"Partial step toward {target_price:.2f}.")
-    if dominance_clamped and not (bounds_clamped and price == min_price):
-        clauses.append("Clamped below a higher-rated competitor.")
+    if dominance_clamped and dominance_side not in ("below_higher_rated", "above_lower_rated"):
+        raise ValueError(f"unexpected dominance_side: {dominance_side}")
+    if dominance_clamped and not (bounds_clamped and price == min_price) and not (bounds_clamped and price == max_price):
+        if dominance_side == "below_higher_rated":
+            clauses.append("Clamped below a higher-rated competitor.")
+        elif dominance_side == "above_lower_rated":
+            clauses.append("Clamped above a lower-rated competitor.")
     if bounds_clamped and price == min_price:
         clauses.append(f"Raised to the floor {min_price:.2f}.")
     if bounds_clamped and price == max_price:
         clauses.append(f"Lowered to the ceiling {max_price:.2f}.")
     if dominance_clamped and bounds_clamped and price == min_price:
         clauses.append("Floor overrode the dominance clamp.")
+    if dominance_clamped and bounds_clamped and price == max_price:
+        clauses.append("Ceiling overrode the dominance clamp.")
 
     if clauses:
         text = text + " " + " ".join(clauses)
