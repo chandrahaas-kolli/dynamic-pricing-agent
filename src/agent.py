@@ -12,17 +12,23 @@ Flow:
                    -> check_move_size -> route on path
                       (llm is overridden to direct for tie targets):
                        escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> END
-                       llm      -> llm_step_size (placeholder) -> compute_step
+                       llm      -> llm_step_size -> compute_step
                                    -> apply_dominance_clamp -> enforce_bounds -> reason -> END
                        direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> END
 
 A persist node will later sit between reason and END on every path.
 """
 
+from functools import lru_cache
 from typing import Dict
 
+from langchain_aws import ChatBedrockConverse
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 
+from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION
+from src.llm_schemas import StepDecision
+from src.prompts import STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT
 from src.state import PipelineState
 from src.pricing import (
     validate_input,
@@ -37,6 +43,36 @@ from src.pricing import (
     apply_dominance_clamp,
     enforce_bounds,
 )
+
+
+# ---------- LLM ----------
+
+@lru_cache(maxsize=1)
+def get_step_llm():
+    """Return the step-size model, created on first use and reused afterwards.
+
+    Created lazily so importing this module needs no AWS credentials, which
+    keeps tests and CI independent of AWS.
+    """
+    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    return llm.with_structured_output(StepDecision, include_raw=True)
+
+
+def build_competitors_text(our_rating, comp_details):
+    """Format competitors as one line each, labelled relative to our rating."""
+    lines = []
+    for i, comp in enumerate(comp_details, start=1):
+        if comp["comp_rating"] > our_rating:
+            label = "rated higher than us"
+        elif comp["comp_rating"] < our_rating:
+            label = "rated lower than us"
+        else:
+            label = "rated the same as us"
+        lines.append(
+            f"- Competitor {i}: price {comp['comp_price']:.2f}, "
+            f"rating {comp['comp_rating']} ({label})"
+        )
+    return "\n".join(lines)
 
 
 # ---------- Nodes ----------
@@ -136,8 +172,45 @@ def check_move_size_node(state: PipelineState) -> Dict:
 
 
 def llm_step_size_node(state: PipelineState) -> Dict:
-    """Placeholder for the LLM step-size choice (llm path). Changes nothing yet."""
-    return {}
+    """Ask the LLM how large a step to take toward the target (llm path only).
+
+    Sends the fixed rules (STEP_SIZE_SYSTEM_PROMPT) and this observation's
+    data (STEP_SIZE_HUMAN_TEMPLATE) to the model and stores the validated
+    StepDecision as llm_step_pct and llm_rationale.
+
+    If the price is already at the target, no call is made. If the output
+    fails validation, raises RuntimeError; retries and routing to escalate
+    will replace this.
+    """
+    current_price = state["current_price"]
+    target_price = state["target_price"]
+    anchor = state["anchor"]
+
+    if round(current_price, 2) == round(target_price, 2):
+        return {}
+
+    direction = "up" if target_price > current_price else "down"
+    remaining_pct = abs(target_price - current_price) / anchor
+    human_text = STEP_SIZE_HUMAN_TEMPLATE.format(
+        current_price=current_price,
+        target_price=target_price,
+        anchor=anchor,
+        direction=direction,
+        remaining_pct=remaining_pct,
+        our_rating=state["our_rating"],
+        competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
+    )
+
+    result = get_step_llm().invoke(
+        [SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+    )
+
+    # parsed can also be None with no error if the model skipped the schema entirely.
+    if result["parsing_error"] is not None or result["parsed"] is None:
+        raise RuntimeError(f"LLM step size output invalid: {result['parsing_error']}")
+
+    decision = result["parsed"]
+    return {"llm_step_pct": decision.step_pct, "llm_rationale": decision.rationale}
 
 
 def compute_step_node(state: PipelineState) -> Dict:
@@ -199,8 +272,8 @@ def escalate_node(state: PipelineState) -> Dict:
     Decides the detail_pack and whether a brief is needed by
     escalation_cause, and for competitor_move, further by len(triggered)
     (2+ simultaneous triggers -> needs_brief). The llm_failed cause is added
-    with the LLM step-size node; brief is filled in once escalation briefs
-    are built.
+    with the LLM step-size retry logic; brief is filled in once escalation
+    briefs are built.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -303,6 +376,8 @@ def reason_node(state: PipelineState) -> Dict:
         clauses.append("Floor overrode the dominance clamp.")
     if dominance_clamped and bounds_clamped and price == max_price:
         clauses.append("Ceiling overrode the dominance clamp.")
+    if path == "llm" and state.get("llm_rationale"):
+        clauses.append(f"Model rationale: {state.get('llm_rationale')}")
 
     if clauses:
         text = text + " " + " ".join(clauses)

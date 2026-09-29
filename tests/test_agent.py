@@ -1,8 +1,24 @@
 import pytest
 from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
-    reason_node, apply_dominance_clamp_node,
+    reason_node, apply_dominance_clamp_node, llm_step_size_node,
+    build_competitors_text,
 )
+from src.llm_schemas import StepDecision
+from src.prompts import STEP_SIZE_SYSTEM_PROMPT
+
+
+class _FakeStepLLM:
+    """Stand-in for get_step_llm()'s return value: records the messages it
+    was invoked with and returns a preset with_structured_output-style dict.
+    """
+    def __init__(self, result):
+        self._result = result
+        self.messages = None
+
+    def invoke(self, messages):
+        self.messages = messages
+        return self._result
 
 
 # --- escalate_node ---
@@ -101,6 +117,87 @@ def test_check_move_size_node_tie_source_still_escalates():
     result = check_move_size_node(state)
     assert result["path"] == "escalate"
     assert result["escalation_cause"] == "cap_exceeded"
+
+
+# --- llm_step_size_node (get_step_llm mocked; no test may call Bedrock) ---
+def _llm_state(**overrides):
+    state = {
+        "current_price": 90,
+        "target_price": 96,
+        "anchor": 92,
+        "our_rating": 4.0,
+        "comp_details": [
+            {"comp_price": 98, "comp_rating": 4.5},
+            {"comp_price": 92, "comp_rating": 4.0},
+            {"comp_price": 80, "comp_rating": 3.5},
+        ],
+    }
+    state.update(overrides)
+    return state
+
+def test_llm_step_size_node_success(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": StepDecision(step_pct=0.02, rationale="Room below the higher-rated competitor at 98."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    result = llm_step_size_node(_llm_state())
+    assert result == {"llm_step_pct": 0.02, "llm_rationale": "Room below the higher-rated competitor at 98."}
+
+def test_llm_step_size_node_parsing_error_raises(monkeypatch):
+    fake = _FakeStepLLM({"parsed": None, "parsing_error": ValueError("bad output"), "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    with pytest.raises(RuntimeError):
+        llm_step_size_node(_llm_state())
+
+def test_llm_step_size_node_parsed_none_no_error_raises(monkeypatch):
+    fake = _FakeStepLLM({"parsed": None, "parsing_error": None, "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    with pytest.raises(RuntimeError):
+        llm_step_size_node(_llm_state())
+
+def test_llm_step_size_node_at_target_no_call(monkeypatch):
+    fake = _FakeStepLLM({"parsed": StepDecision(step_pct=0.02, rationale="x"), "parsing_error": None, "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    result = llm_step_size_node(_llm_state(current_price=96, target_price=96))
+    assert result == {}
+    assert fake.messages is None
+
+def test_llm_step_size_node_human_text_upward(monkeypatch):
+    fake = _FakeStepLLM({"parsed": StepDecision(step_pct=0.02, rationale="x"), "parsing_error": None, "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    llm_step_size_node(_llm_state(current_price=90, target_price=96, anchor=92))
+    human_text = fake.messages[1].content
+    assert "Direction: up" in human_text
+    assert "Current price: 90.00" in human_text
+    assert "Target price: 96.00" in human_text
+    assert "Anchor price: 92.00" in human_text
+    assert f"{abs(96 - 90) / 92:.4f}" in human_text
+
+def test_llm_step_size_node_human_text_downward(monkeypatch):
+    fake = _FakeStepLLM({"parsed": StepDecision(step_pct=0.02, rationale="x"), "parsing_error": None, "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    llm_step_size_node(_llm_state(current_price=96, target_price=90, anchor=92))
+    human_text = fake.messages[1].content
+    assert "Direction: down" in human_text
+
+def test_llm_step_size_node_system_prompt_sent(monkeypatch):
+    fake = _FakeStepLLM({"parsed": StepDecision(step_pct=0.02, rationale="x"), "parsing_error": None, "raw": None})
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    llm_step_size_node(_llm_state())
+    assert fake.messages[0].content == STEP_SIZE_SYSTEM_PROMPT
+
+def test_build_competitors_text_labels():
+    comp_details = [
+        {"comp_price": 98, "comp_rating": 4.5},
+        {"comp_price": 92, "comp_rating": 4.0},
+        {"comp_price": 80, "comp_rating": 3.5},
+    ]
+    text = build_competitors_text(4.0, comp_details)
+    lines = text.split("\n")
+    assert lines[0] == "- Competitor 1: price 98.00, rating 4.5 (rated higher than us)"
+    assert lines[1] == "- Competitor 2: price 92.00, rating 4.0 (rated the same as us)"
+    assert lines[2] == "- Competitor 3: price 80.00, rating 3.5 (rated lower than us)"
 
 
 # --- app.invoke, graph-level ---
@@ -298,6 +395,18 @@ def test_reason_node_unknown_dominance_side():
     with pytest.raises(ValueError):
         reason_node(state)
 
+def test_reason_node_llm_rationale_clause():
+    state = _priced_state(path="llm", price=96, current_price=90, target_price=96, target_source="band",
+                           llm_rationale="Room below the higher-rated competitor at 98.")
+    result = reason_node(state)
+    assert result["reason"].endswith("Model rationale: Room below the higher-rated competitor at 98.")
+
+def test_reason_node_direct_path_no_rationale_clause():
+    state = _priced_state(path="direct", price=96, current_price=90, target_price=96, target_source="band",
+                           llm_rationale="Should not appear.")
+    result = reason_node(state)
+    assert "Model rationale" not in result["reason"]
+
 def test_reason_node_epsilon_formatting():
     state = _priced_state(price=45 - 0.01, current_price=44, target_price=45 - 0.01, target_source="tie_undercut",
                            cleared_comp={"comp_price": 45, "comp_rating": 4.5})
@@ -340,7 +449,12 @@ def test_app_invoke_reason_direct():
     result = app.invoke(proceed)
     assert result["reason"]
 
-def test_app_invoke_reason_llm():
+def test_app_invoke_reason_llm(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": StepDecision(step_pct=0.02, rationale="Test rationale."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
     proceed = {**base, "comp_prices": [80, 40, 35],
                "prev_comp_prices": [74, 39.24, 39.24],
                "comp_ratings": [4.5, 4.2, 3.8],
@@ -348,7 +462,7 @@ def test_app_invoke_reason_llm():
                "current_price": 56,
                "min_price": 1,
                "max_price": 55,
-               "anchor": 56,
-               "llm_step_pct": 0.01}
+               "anchor": 56}
     result = app.invoke(proceed)
-    assert result["reason"]
+    assert result["llm_step_pct"] == 0.02
+    assert "Model rationale: Test rationale." in result["reason"]

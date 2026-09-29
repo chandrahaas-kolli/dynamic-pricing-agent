@@ -43,6 +43,7 @@ class PipelineState(TypedDict):
     dominance_clamped: NotRequired[bool]
     dominance_side: NotRequired[Optional[str]]
     bounds_clamped: NotRequired[bool]
+    llm_rationale: NotRequired[str]
     min_price: NotRequired[float]
     max_price: NotRequired[float]
     escalation_cause: NotRequired[str]
