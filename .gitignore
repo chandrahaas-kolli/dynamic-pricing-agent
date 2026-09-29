@@ -5,3 +5,5 @@ __pycache__/
 CLAUDE.md
 .DS_Store
 .pytest_cache/
+.claude/
+src/scratch_*.py

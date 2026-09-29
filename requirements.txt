@@ -1,6 +1,10 @@
-pandas
-pytest
-python-dotenv
-python-dateutil
-langgraph
+pandas==3.0.5
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+langgraph==1.2.11
 python-dotenv==1.2.3
+langchain-aws==1.7.9
+langchain-core==1.6.3
+pydantic==2.13.5
+typing-extensions==4.16.0
+awscrt==0.36.0
