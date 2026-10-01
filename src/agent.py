@@ -32,7 +32,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 
 from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION
-from src.llm_schemas import StepDecision
+from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.prompts import STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT
 from src.state import PipelineState
 from src.pricing import (
@@ -61,6 +61,20 @@ def get_step_llm():
     """
     llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
     return llm.with_structured_output(StepDecision, include_raw=True)
+
+
+@lru_cache(maxsize=1)
+def get_cap_brief_llm():
+    """Return the cap-exceeded brief model, created on first use and reused afterwards."""
+    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    return llm.with_structured_output(CapExceededBrief, include_raw=True)
+
+
+@lru_cache(maxsize=1)
+def get_market_brief_llm():
+    """Return the market-move brief model, created on first use and reused afterwards."""
+    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    return llm.with_structured_output(MarketMoveBrief, include_raw=True)
 
 
 def build_competitors_text(our_rating, comp_details):
