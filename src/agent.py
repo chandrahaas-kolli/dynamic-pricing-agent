@@ -100,6 +100,45 @@ RETRYABLE_CODES = {
 }
 
 
+def invoke_with_retries(llm, messages):
+    """Call llm.invoke(messages) with retries, schema-agnostic (reusable by escalation briefs).
+
+    Retries up to MAX_ATTEMPTS times on: a retryable ClientError code
+    (RETRYABLE_CODES), a connection/read-timeout error, or invalid output
+    (a schema failure or a missing parsed result), backing off
+    (BACKOFF_SECONDS) between attempts except after the last one. A
+    non-retryable ClientError code stops immediately instead of retrying.
+
+    Returns (parsed, llm_errors, attempts):
+    - success: (result["parsed"], llm_errors so far, attempt + 1)
+    - failure: (None, llm_errors, len(llm_errors))
+    """
+    llm_errors = []
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            result = llm.invoke(messages)
+            # parsed can also be None with no error if the model skipped the schema entirely.
+            if result["parsing_error"] is not None:
+                llm_errors.append("invalid output: failed schema validation")
+            elif result["parsed"] is None:
+                llm_errors.append("invalid output: no structured answer")
+            else:
+                return result["parsed"], llm_errors, attempt + 1
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            message = e.response["Error"]["Message"]
+            llm_errors.append(f"{code}: {message}")
+            if code not in RETRYABLE_CODES:
+                break
+        except (EndpointConnectionError, ReadTimeoutError) as e:
+            llm_errors.append(type(e).__name__)
+
+        if attempt < MAX_ATTEMPTS - 1:
+            time.sleep(BACKOFF_SECONDS[attempt])
+
+    return None, llm_errors, len(llm_errors)
+
+
 # ---------- Nodes ----------
 # A node reads the state and returns a dict of only the keys it changes.
 # LangGraph merges that dict into the state.
@@ -205,12 +244,9 @@ def llm_step_size_node(state: PipelineState) -> Dict:
     and llm_errors from any failed attempts before the eventual success
     (empty on a first-try success).
 
-    If the price is already at the target, no call is made. Otherwise retries
-    up to MAX_ATTEMPTS times: a retryable ClientError code (RETRYABLE_CODES),
-    a connection/read-timeout error, or invalid model output (schema failure
-    or a missing parsed result) all count as a failed attempt and try again
-    after a backoff (BACKOFF_SECONDS), except on the last attempt. A
-    non-retryable ClientError code stops immediately instead of retrying.
+    If the price is already at the target, no call is made. Otherwise the
+    call (with retries) is delegated to invoke_with_retries; see its
+    docstring for what it retries, what it stops on, and what it returns.
 
     If every attempt fails, returns escalate=True, tier='medium',
     escalation_cause='llm_failed', llm_errors (one message per failed
@@ -235,43 +271,23 @@ def llm_step_size_node(state: PipelineState) -> Dict:
         competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
     )
     messages = [SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT), HumanMessage(content=human_text)]
-    llm = get_step_llm()
 
-    llm_errors = []
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            result = llm.invoke(messages)
-            # parsed can also be None with no error if the model skipped the schema entirely.
-            if result["parsing_error"] is not None:
-                llm_errors.append("invalid output: failed schema validation")
-            elif result["parsed"] is None:
-                llm_errors.append("invalid output: no structured answer")
-            else:
-                decision = result["parsed"]
-                return {
-                    "llm_step_pct": decision.step_pct,
-                    "llm_rationale": decision.rationale,
-                    "llm_attempts": attempt + 1,
-                    "llm_errors": llm_errors,
-                }
-        except ClientError as e:
-            code = e.response["Error"]["Code"]
-            message = e.response["Error"]["Message"]
-            llm_errors.append(f"{code}: {message}")
-            if code not in RETRYABLE_CODES:
-                break
-        except (EndpointConnectionError, ReadTimeoutError) as e:
-            llm_errors.append(type(e).__name__)
+    parsed, llm_errors, attempts = invoke_with_retries(get_step_llm(), messages)
 
-        if attempt < MAX_ATTEMPTS - 1:
-            time.sleep(BACKOFF_SECONDS[attempt])
+    if parsed is None:
+        return {
+            "escalate": True,
+            "tier": "medium",
+            "escalation_cause": "llm_failed",
+            "llm_errors": llm_errors,
+            "llm_attempts": attempts,
+        }
 
     return {
-        "escalate": True,
-        "tier": "medium",
-        "escalation_cause": "llm_failed",
+        "llm_step_pct": parsed.step_pct,
+        "llm_rationale": parsed.rationale,
+        "llm_attempts": attempts,
         "llm_errors": llm_errors,
-        "llm_attempts": len(llm_errors),
     }
 
 
