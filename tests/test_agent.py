@@ -1,4 +1,6 @@
 import pytest
+from botocore.exceptions import ClientError, EndpointConnectionError
+
 from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
@@ -8,16 +10,37 @@ from src.llm_schemas import StepDecision
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
 
 
+def _client_error(code, message="failure"):
+    return ClientError({"Error": {"Code": code, "Message": message}}, "Converse")
+
+
 class _FakeStepLLM:
     """Stand-in for get_step_llm()'s return value: records the messages it
     was invoked with and returns a preset with_structured_output-style dict.
+
+    Pass a single dict/result to return it on every call, or a list to pop
+    one outcome per call (an outcome that's an Exception instance is raised
+    instead of returned) — mirrors Mock's side_effect for a sequence of
+    retry attempts.
     """
     def __init__(self, result):
-        self._result = result
+        if isinstance(result, list):
+            self._side_effects = iter(result)
+            self._result = None
+        else:
+            self._side_effects = None
+            self._result = result
         self.messages = None
+        self.call_count = 0
 
     def invoke(self, messages):
         self.messages = messages
+        self.call_count += 1
+        if self._side_effects is not None:
+            outcome = next(self._side_effects)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
         return self._result
 
 
@@ -142,19 +165,30 @@ def test_llm_step_size_node_success(monkeypatch):
     })
     monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
     result = llm_step_size_node(_llm_state())
-    assert result == {"llm_step_pct": 0.02, "llm_rationale": "Room below the higher-rated competitor at 98."}
+    assert result == {
+        "llm_step_pct": 0.02,
+        "llm_rationale": "Room below the higher-rated competitor at 98.",
+        "llm_attempts": 1,
+        "llm_errors": [],
+    }
 
-def test_llm_step_size_node_parsing_error_raises(monkeypatch):
+def test_llm_step_size_node_parsing_error_escalates(monkeypatch):
     fake = _FakeStepLLM({"parsed": None, "parsing_error": ValueError("bad output"), "raw": None})
     monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
-    with pytest.raises(RuntimeError):
-        llm_step_size_node(_llm_state())
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert result["escalation_cause"] == "llm_failed"
+    assert fake.call_count == 3
+    assert result["llm_errors"] == ["invalid output: failed schema validation"] * 3
 
-def test_llm_step_size_node_parsed_none_no_error_raises(monkeypatch):
+def test_llm_step_size_node_parsed_none_no_error_escalates(monkeypatch):
     fake = _FakeStepLLM({"parsed": None, "parsing_error": None, "raw": None})
     monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
-    with pytest.raises(RuntimeError):
-        llm_step_size_node(_llm_state())
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert result["escalation_cause"] == "llm_failed"
+    assert fake.call_count == 3
+    assert result["llm_errors"] == ["invalid output: no structured answer"] * 3
 
 def test_llm_step_size_node_at_target_no_call(monkeypatch):
     fake = _FakeStepLLM({"parsed": StepDecision(step_pct=0.02, rationale="x"), "parsing_error": None, "raw": None})
@@ -304,6 +338,15 @@ def test_reason_node_cap_exceeded_negative_x_anchor():
     result = reason_node(state)
     assert "-25.0%" in result["reason"]
     assert "±10%" in result["reason"]
+
+def test_reason_node_llm_failed_exact_text():
+    state = {
+        "escalation_cause": "llm_failed",
+        "llm_errors": ["AccessDeniedException: denied"],
+        "llm_attempts": 1,
+    }
+    result = reason_node(state)
+    assert result["reason"] == "Escalated (medium): step-size model failed after 1 attempt (AccessDeniedException)."
 
 def test_reason_node_unknown_escalation_cause():
     with pytest.raises(ValueError):
@@ -466,3 +509,127 @@ def test_app_invoke_reason_llm(monkeypatch):
     result = app.invoke(proceed)
     assert result["llm_step_pct"] == 0.02
     assert "Model rationale: Test rationale." in result["reason"]
+    
+    
+# --- llm_step_size_node: retries and failure -> escalate ---
+def _llm_proceed_state(**overrides):
+    state = {**base, "comp_prices": [80, 40, 35],
+             "prev_comp_prices": [74, 39.24, 39.24],
+             "comp_ratings": [4.5, 4.2, 3.8],
+             "our_rating": 4.3,
+             "current_price": 56,
+             "min_price": 1,
+             "max_price": 100,
+             "anchor": 56}
+    state.update(overrides)
+    return state
+
+def _step_decision_result(step_pct=0.02, rationale="ok"):
+    return {"parsed": StepDecision(step_pct=step_pct, rationale=rationale),
+            "parsing_error": None, "raw": None}
+
+# 1. Success on first try -> invoke called once, llm_attempts == 1, graph prices.
+def test_llm_step_size_success_first_try_reaches_compute_step(monkeypatch):
+    fake = _FakeStepLLM(_step_decision_result())
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    result = app.invoke(_llm_proceed_state())
+    assert fake.call_count == 1
+    assert result["llm_attempts"] == 1
+    assert result["llm_step_pct"] == 0.02
+    assert "price" in result
+
+# 2. ThrottlingException x2, then success -> invoke called 3 times, priced normally.
+def test_llm_step_size_throttle_twice_then_success(monkeypatch):
+    fake = _FakeStepLLM([
+        _client_error("ThrottlingException"),
+        _client_error("ThrottlingException"),
+        _step_decision_result(),
+    ])
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert fake.call_count == 3
+    assert result["llm_attempts"] == 3
+    assert result["llm_step_pct"] == 0.02
+    assert result["llm_errors"] == ["ThrottlingException: failure"] * 2
+
+# 3. ThrottlingException x3 -> escalation_cause == llm_failed, no price in state,
+#    graph routes through escalate_node/reason_node instead of compute_step.
+def test_llm_step_size_throttle_three_times_escalates(monkeypatch):
+    fake = _FakeStepLLM([_client_error("ThrottlingException")] * 3)
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = app.invoke(_llm_proceed_state())
+    assert result["escalation_cause"] == "llm_failed"
+    assert result["tier"] == "medium"
+    assert "price" not in result
+    assert result["reason"].startswith("Escalated")
+    assert len(result["llm_errors"]) == 3
+
+# 4. None (no parsed, no error) x3 -> counts as a failure, not a crash.
+def test_llm_step_size_none_three_times_escalates(monkeypatch):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = app.invoke(_llm_proceed_state())
+    assert result["escalation_cause"] == "llm_failed"
+    assert result["tier"] == "medium"
+    assert "price" not in result
+    assert len(result["llm_errors"]) == 3
+
+# 5. Non-retryable code -> stops after one attempt instead of retrying.
+def test_llm_step_size_non_retryable_code_stops_after_one_attempt(monkeypatch):
+    fake = _FakeStepLLM([_client_error("AccessDeniedException", "denied")])
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert fake.call_count == 1
+    assert result["llm_attempts"] == 1
+    assert result["escalation_cause"] == "llm_failed"
+    assert result["llm_errors"] == ["AccessDeniedException: denied"]
+
+# 6. Schema failure, then success -> invoke called 2 times, priced.
+def test_llm_step_size_schema_failure_then_success(monkeypatch):
+    fake = _FakeStepLLM([
+        {"parsed": None, "parsing_error": ValueError("bad"), "raw": None},
+        _step_decision_result(),
+    ])
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert fake.call_count == 2
+    assert result["llm_attempts"] == 2
+    assert result["llm_step_pct"] == 0.02
+
+# 7. EndpointConnectionError, then success -> invoke called 2 times, priced.
+def test_llm_step_size_connection_error_then_success(monkeypatch):
+    fake = _FakeStepLLM([
+        EndpointConnectionError(endpoint_url="https://bedrock.amazonaws.com"),
+        _step_decision_result(),
+    ])
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = llm_step_size_node(_llm_state())
+    assert fake.call_count == 2
+    assert result["llm_attempts"] == 2
+    assert result["llm_step_pct"] == 0.02
+
+# 8. Three failures -> sleep called exactly twice, with 1 then 2 (never after the last attempt).
+def test_llm_step_size_backoff_schedule(monkeypatch):
+    fake = _FakeStepLLM([_client_error("ThrottlingException")] * 3)
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    sleep_calls = []
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: sleep_calls.append(seconds))
+    llm_step_size_node(_llm_state())
+    assert sleep_calls == [1, 2]
+
+# 9. llm_failed -> escalate sets needs_brief False, detail_pack has llm_errors and llm_attempts.
+def test_escalate_node_llm_failed():
+    state = {
+        "escalation_cause": "llm_failed",
+        "llm_errors": ["ThrottlingException: rate", "ThrottlingException: rate", "ServiceUnavailableException: down"],
+        "llm_attempts": 3,
+    }
+    result = escalate_node(state)
+    assert result["needs_brief"] is False
+    assert result["detail_pack"] == {"llm_errors": state["llm_errors"], "llm_attempts": 3}

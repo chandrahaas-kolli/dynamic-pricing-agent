@@ -12,16 +12,21 @@ Flow:
                    -> check_move_size -> route on path
                       (llm is overridden to direct for tie targets):
                        escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> END
-                       llm      -> llm_step_size -> compute_step
-                                   -> apply_dominance_clamp -> enforce_bounds -> reason -> END
+                       llm      -> llm_step_size -> route on outcome:
+                                       escalate (escalation_cause=llm_failed)
+                                           -> escalate_node -> reason -> END
+                                       compute_step -> compute_step
+                                           -> apply_dominance_clamp -> enforce_bounds -> reason -> END
                        direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> END
 
 A persist node will later sit between reason and END on every path.
 """
 
+import time
 from functools import lru_cache
 from typing import Dict
 
+from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
@@ -73,6 +78,26 @@ def build_competitors_text(our_rating, comp_details):
             f"rating {comp['comp_rating']} ({label})"
         )
     return "\n".join(lines)
+
+
+# Retry policy for the step-size LLM call.
+# Max calls per observation before escalating to a human. Bounds the loop.
+MAX_ATTEMPTS = 3
+
+# Seconds to wait after each failed attempt. One entry fewer than MAX_ATTEMPTS:
+# no wait after the final attempt.
+BACKOFF_SECONDS = (1, 2)
+
+# Bedrock error codes that are transient and worth retrying. Allowlist on purpose:
+# any code not listed (e.g. AccessDeniedException, ValidationException) is treated
+# as permanent and escalates immediately instead of being retried.
+RETRYABLE_CODES = {
+    "ThrottlingException",
+    "ServiceUnavailableException",
+    "InternalServerException",
+    "ModelTimeoutException",
+    "ModelNotReadyException",
+}
 
 
 # ---------- Nodes ----------
@@ -176,11 +201,20 @@ def llm_step_size_node(state: PipelineState) -> Dict:
 
     Sends the fixed rules (STEP_SIZE_SYSTEM_PROMPT) and this observation's
     data (STEP_SIZE_HUMAN_TEMPLATE) to the model and stores the validated
-    StepDecision as llm_step_pct and llm_rationale.
+    StepDecision as llm_step_pct and llm_rationale, along with llm_attempts
+    and llm_errors from any failed attempts before the eventual success
+    (empty on a first-try success).
 
-    If the price is already at the target, no call is made. If the output
-    fails validation, raises RuntimeError; retries and routing to escalate
-    will replace this.
+    If the price is already at the target, no call is made. Otherwise retries
+    up to MAX_ATTEMPTS times: a retryable ClientError code (RETRYABLE_CODES),
+    a connection/read-timeout error, or invalid model output (schema failure
+    or a missing parsed result) all count as a failed attempt and try again
+    after a backoff (BACKOFF_SECONDS), except on the last attempt. A
+    non-retryable ClientError code stops immediately instead of retrying.
+
+    If every attempt fails, returns escalate=True, tier='medium',
+    escalation_cause='llm_failed', llm_errors (one message per failed
+    attempt) and llm_attempts, instead of raising.
     """
     current_price = state["current_price"]
     target_price = state["target_price"]
@@ -200,17 +234,45 @@ def llm_step_size_node(state: PipelineState) -> Dict:
         our_rating=state["our_rating"],
         competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
     )
+    messages = [SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+    llm = get_step_llm()
 
-    result = get_step_llm().invoke(
-        [SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT), HumanMessage(content=human_text)]
-    )
+    llm_errors = []
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            result = llm.invoke(messages)
+            # parsed can also be None with no error if the model skipped the schema entirely.
+            if result["parsing_error"] is not None:
+                llm_errors.append("invalid output: failed schema validation")
+            elif result["parsed"] is None:
+                llm_errors.append("invalid output: no structured answer")
+            else:
+                decision = result["parsed"]
+                return {
+                    "llm_step_pct": decision.step_pct,
+                    "llm_rationale": decision.rationale,
+                    "llm_attempts": attempt + 1,
+                    "llm_errors": llm_errors,
+                }
+        except ClientError as e:
+            code = e.response["Error"]["Code"]
+            message = e.response["Error"]["Message"]
+            llm_errors.append(f"{code}: {message}")
+            if code not in RETRYABLE_CODES:
+                break
+        except (EndpointConnectionError, ReadTimeoutError) as e:
+            llm_errors.append(type(e).__name__)
 
-    # parsed can also be None with no error if the model skipped the schema entirely.
-    if result["parsing_error"] is not None or result["parsed"] is None:
-        raise RuntimeError(f"LLM step size output invalid: {result['parsing_error']}")
+        if attempt < MAX_ATTEMPTS - 1:
+            time.sleep(BACKOFF_SECONDS[attempt])
 
-    decision = result["parsed"]
-    return {"llm_step_pct": decision.step_pct, "llm_rationale": decision.rationale}
+    return {
+        "escalate": True,
+        "tier": "medium",
+        "escalation_cause": "llm_failed",
+        "llm_errors": llm_errors,
+        "llm_attempts": len(llm_errors),
+    }
 
 
 def compute_step_node(state: PipelineState) -> Dict:
@@ -267,13 +329,14 @@ def enforce_bounds_node(state: PipelineState) -> Dict:
 
 
 def escalate_node(state: PipelineState) -> Dict:
-    """Merged escalation for competitor_move and cap_exceeded.
+    """Merged escalation for competitor_move, cap_exceeded and llm_failed.
 
     Decides the detail_pack and whether a brief is needed by
-    escalation_cause, and for competitor_move, further by len(triggered)
-    (2+ simultaneous triggers -> needs_brief). The llm_failed cause is added
-    with the LLM step-size retry logic; brief is filled in once escalation
-    briefs are built.
+    escalation_cause: competitor_move further by len(triggered) (2+
+    simultaneous triggers -> needs_brief); cap_exceeded always needs a
+    brief; llm_failed never does (the retry loop already exhausted
+    automated options, so this just surfaces the failure). brief is filled
+    in once escalation briefs are built.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -295,6 +358,12 @@ def escalate_node(state: PipelineState) -> Dict:
             "gap": state["gap"],
         }
         needs_brief = True
+    elif cause == "llm_failed":
+        detail_pack = {
+            "llm_errors": state["llm_errors"],
+            "llm_attempts": state["llm_attempts"],
+        }
+        needs_brief = False
     else:
         raise ValueError(f"unexpected escalation_cause: {cause}")
     return {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
@@ -309,12 +378,13 @@ def reason_node(state: PipelineState) -> Dict:
     """Compose a deterministic, LLM-free explanation of the outcome.
 
     Runs on every path (escalated, no-change, and priced) as the graph's
-    last node. Checked in order: escalation_cause (competitor_move or
-    cap_exceeded escalation text, or ValueError on any other cause that is
-    present), then action == 'none' (below the deadband), then the priced
-    case (direct/llm paths) — which explains target_source and appends
-    clauses for any partial step or clamp that fired. Invalid input never
-    reaches here, since validate_input raises before any node runs.
+    last node. Checked in order: escalation_cause (competitor_move,
+    cap_exceeded or llm_failed escalation text, or ValueError on any other
+    cause that is present), then action == 'none' (below the deadband),
+    then the priced case (direct/llm paths) — which explains target_source
+    and appends clauses for any partial step or clamp that fired. Invalid
+    input never reaches here, since validate_input raises before any node
+    runs.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -326,6 +396,12 @@ def reason_node(state: PipelineState) -> Dict:
         x_anchor = state["x_anchor"]
         anchor = state["anchor"]
         text = f"Escalated (medium): target {target_price:.2f} is {x_anchor:+.1f}% from anchor {anchor:.2f}, beyond the ±10% monthly cap."
+        return {"reason": text}
+    elif cause == "llm_failed":
+        llm_attempts = state["llm_attempts"]
+        attempt_word = "attempt" if llm_attempts == 1 else "attempts"
+        codes = ", ".join(error.split(":", 1)[0] for error in state["llm_errors"])
+        text = f"Escalated (medium): step-size model failed after {llm_attempts} {attempt_word} ({codes})."
         return {"reason": text}
     elif cause is not None:
         raise ValueError(f"unexpected escalation_cause: {cause}")
@@ -402,6 +478,15 @@ def route_check_move_size(state: PipelineState) -> str:
     raise ValueError(f"unexpected path: {state['path']}")
 
 
+def route_llm_step_size(state: PipelineState) -> str:
+    """Return 'escalate' if the step-size call failed after retries, else 'compute_step'."""
+    outcome = "escalate" if state.get("escalation_cause") == "llm_failed" else "compute_step"
+    for route in ("escalate", "compute_step"):
+        if outcome == route:
+            return route
+    raise ValueError(f"unexpected llm_step_size outcome: {outcome}")
+
+
 # ---------- Graph wiring ----------
 
 graph = StateGraph(PipelineState)
@@ -441,7 +526,11 @@ graph.add_conditional_edges(
     {"escalate": "escalate_node", "llm": "llm_step_size_node", "direct": "compute_step_node"},
 )
 
-graph.add_edge("llm_step_size_node", "compute_step_node")
+graph.add_conditional_edges(
+    "llm_step_size_node",
+    route_llm_step_size,
+    {"escalate": "escalate_node", "compute_step": "compute_step_node"},
+)
 graph.add_edge("compute_step_node", "apply_dominance_clamp_node")
 graph.add_edge("apply_dominance_clamp_node", "enforce_bounds_node")
 graph.add_edge("enforce_bounds_node", "reason_node")

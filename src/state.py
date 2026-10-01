@@ -39,6 +39,8 @@ class PipelineState(TypedDict):
     x_anchor: NotRequired[float]
     current_price: NotRequired[float]
     llm_step_pct: NotRequired[float]
+    llm_attempts: NotRequired[int]
+    llm_errors: NotRequired[List[str]]
     price: NotRequired[float]
     dominance_clamped: NotRequired[bool]
     dominance_side: NotRequired[Optional[str]]
