@@ -3,7 +3,7 @@ from src.pricing import (
     validate_prices, validate_ratings, validate_observed_at, check_continuity,
     validate_input, pair_competitors, competitor_move_check, build_band,
     rating_gap, choose_target, resolve_target_price, check_move_size,
-    compute_step, apply_dominance_clamp, enforce_bounds,
+    compute_step, apply_dominance_clamp, enforce_bounds, months_to_reach,
 )
 
 
@@ -379,3 +379,31 @@ def test_enforce_bounds_at_floor_boundary():
 def test_enforce_bounds_at_ceiling_boundary():
     # price == max_price exactly: comparison is strict (>), must not be treated as "above ceiling"
     assert enforce_bounds("g4", 130, 90, 130) == 130
+
+
+# --- months_to_reach ---
+def test_months_to_reach_rising_target():
+    assert months_to_reach(100, 125) == 3
+
+def test_months_to_reach_falling_target():
+    # linear (distance / cap) would say 3; compounding needs 4
+    assert months_to_reach(100, 72) == 4
+
+def test_months_to_reach_rising_target_large():
+    # linear would say 5; compounding needs only 4
+    assert months_to_reach(100, 146) == 4
+
+def test_months_to_reach_exact_boundary():
+    # 0.9**4 == 0.6561 exactly, but the raw ratio is 4.000000000000001 in
+    # floating point; without round() ceil would give 5, not 4
+    assert months_to_reach(100, 65.61) == 4
+
+def test_months_to_reach_small_move():
+    assert months_to_reach(100, 105) == 1
+
+def test_months_to_reach_target_equals_anchor():
+    assert months_to_reach(100, 100) == 0
+
+def test_months_to_reach_anchor_not_positive():
+    with pytest.raises(ValueError):
+        months_to_reach(0, 100)

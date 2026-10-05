@@ -1,4 +1,6 @@
 from datetime import datetime
+from math import ceil, log
+
 from dateutil.relativedelta import relativedelta
 
 
@@ -256,3 +258,43 @@ def enforce_bounds(product_id, price, min_price, max_price):
         return max_price
     else:
         return price
+
+
+def months_to_reach(anchor, target, cap=0.10):
+    """Minimum whole months to move from anchor to target, moving at most
+    `cap` per month, where the anchor resets each month to that month's new
+    price.
+
+    Because the anchor resets monthly, the move compounds: each month's cap
+    applies to the previous month's price, not the original one. A linear
+    estimate (distance / cap) overcounts a rising target and undercounts a
+    falling one for exactly that reason (e.g. +46%: 5 vs 4; -28%: 3 vs 4).
+    The number of compounding steps needed is log(target / anchor) base
+    (1 + cap) (or base (1 - cap) for a falling target).
+
+    The raw ratio is rounded to 9 decimal places before ceil(): floating-
+    point noise can land a result that's mathematically exact (e.g. 2) just
+    above the integer (e.g. 2.0000000000000004), which would otherwise push
+    the answer up by a spurious month.
+
+    Args:
+        anchor: current anchor price, must be greater than 0.
+        target: price to reach, must be greater than 0.
+        cap: maximum fractional move per month (e.g. 0.10 for 10%).
+
+    Returns:
+        Minimum whole number of months (int); 0 if target equals anchor.
+
+    Raises:
+        ValueError: if anchor or target is not greater than 0.
+    """
+    if anchor <= 0:
+        raise ValueError(f'Invalid anchor: {anchor}, must be greater than 0')
+    if target <= 0:
+        raise ValueError(f'Invalid target: {target}, must be greater than 0')
+    if target == anchor:
+        return 0
+
+    ratio = target / anchor
+    base = 1 + cap if ratio > 1 else 1 - cap
+    return ceil(round(log(ratio) / log(base), 9))
