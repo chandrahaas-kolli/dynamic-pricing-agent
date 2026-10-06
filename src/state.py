@@ -51,4 +51,8 @@ class PipelineState(TypedDict):
     escalation_cause: NotRequired[str]
     detail_pack: NotRequired[Dict]
     needs_brief: NotRequired[bool]
-    brief: NotRequired[Optional[str]]
+    # model_dump() of the escalation brief (CapExceededBrief/MarketMoveBrief), or None
+    brief: NotRequired[Optional[Dict]]
+    # errors and attempt count from the escalation-brief LLM call; kept out of detail_pack
+    brief_errors: NotRequired[List[str]]
+    brief_attempts: NotRequired[int]

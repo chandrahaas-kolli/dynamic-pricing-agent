@@ -99,6 +99,7 @@ def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
                 }
                 for i in high_hits
             ],
+            "percent_diff": percent_diff,
         }
 
     moved = [i for i, val in enumerate(percent_diff) if abs(val) >= 2]

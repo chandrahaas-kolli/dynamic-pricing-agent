@@ -33,7 +33,11 @@ from langgraph.graph import StateGraph, START, END
 
 from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
-from src.prompts import STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT
+from src.prompts import (
+    STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT,
+    CAP_BRIEF_HUMAN_TEMPLATE, CAP_BRIEF_SYSTEM_PROMPT,
+    MARKET_BRIEF_HUMAN_TEMPLATE, MARKET_BRIEF_SYSTEM_PROMPT,
+)
 from src.state import PipelineState
 from src.pricing import (
     validate_input,
@@ -47,6 +51,7 @@ from src.pricing import (
     compute_step,
     apply_dominance_clamp,
     enforce_bounds,
+    months_to_reach,
 )
 
 
@@ -91,6 +96,45 @@ def build_competitors_text(our_rating, comp_details):
             f"- Competitor {i}: price {comp['comp_price']:.2f}, "
             f"rating {comp['comp_rating']} ({label})"
         )
+    return "\n".join(lines)
+
+
+# Plain-English reason for each target_source, for the escalation-brief prompts.
+TARGET_REASONS = {
+    "band": "the {target_label} point of the competitor price band, set by our rating position",
+    "tie_match": "matches the price of a competitor rated the same as us",
+    "tie_undercut": "just below the cheapest competitor rated higher than us",
+    "top_premium": "a premium above the band's high end, because we are rated above every competitor",
+}
+
+
+def describe_target(target_source, target_label):
+    """Return the plain-English reason for target_source, with target_label
+    formatted into the band entry.
+
+    The brief prompt needs plain text explaining why this target was chosen,
+    not the raw internal labels (target_source, target_label).
+    """
+    if target_source not in TARGET_REASONS:
+        raise ValueError(f"unexpected target_source: {target_source}")
+    return TARGET_REASONS[target_source].format(target_label=target_label)
+
+
+def build_market_move_text(comp_prices, prev_comp_prices, comp_ratings, percent_diff, triggered):
+    """Format competitors as one line each: previous price, new price,
+    percent change, rating, and whether that competitor triggered the
+    30%+ move check.
+
+    percent_diff and triggered are read as given, not recomputed: the move
+    check already decided both, and this only presents them.
+    """
+    triggered_indexes = {t["index"] for t in triggered}
+    lines = []
+    for i, (prev, new, rating) in enumerate(zip(prev_comp_prices, comp_prices, comp_ratings)):
+        line = f"- Competitor {i + 1}: {prev:.2f} -> {new:.2f} ({percent_diff[i]:+.1f}%), rating {rating}"
+        if i in triggered_indexes:
+            line += " [moved 30%+]"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -151,6 +195,67 @@ def invoke_with_retries(llm, messages):
             time.sleep(BACKOFF_SECONDS[attempt])
 
     return None, llm_errors, len(llm_errors)
+
+
+def _cap_brief(state):
+    """Ask the LLM for a cap-exceeded brief (one_time_jump vs multi_month_path).
+
+    Fills CAP_BRIEF_HUMAN_TEMPLATE from state, including the plain-English
+    target reason (describe_target) and the months needed at the cap
+    (months_to_reach), and delegates the call (with retries) to
+    invoke_with_retries.
+
+    Returns (brief, llm_errors, attempts): brief is parsed.model_dump() on
+    success or None on failure. Never raises on a failed brief; the caller
+    decides what a missing brief means.
+    """
+    human_text = CAP_BRIEF_HUMAN_TEMPLATE.format(
+        current_price=state["current_price"],
+        anchor=state["anchor"],
+        target_price=state["target_price"],
+        x_anchor=state["x_anchor"],
+        target_reason=describe_target(state["target_source"], state["target_label"]),
+        months_needed=months_to_reach(state["anchor"], state["target_price"]),
+        min_price=state["min_price"],
+        max_price=state["max_price"],
+        our_rating=state["our_rating"],
+        band_low=state["band"]["low"],
+        band_mid=state["band"]["mid"],
+        band_high=state["band"]["high"],
+        competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
+    )
+    messages = [SystemMessage(content=CAP_BRIEF_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+
+    parsed, llm_errors, attempts = invoke_with_retries(get_cap_brief_llm(), messages)
+
+    return (parsed.model_dump() if parsed is not None else None), llm_errors, attempts
+
+
+def _market_brief(state):
+    """Ask the LLM for a market-move brief (market_shift vs data_error vs unclear).
+
+    Fills MARKET_BRIEF_HUMAN_TEMPLATE from state, including the triggered
+    and total competitor counts and the per-competitor move text
+    (build_market_move_text), and delegates the call (with retries) to
+    invoke_with_retries.
+
+    Returns (brief, llm_errors, attempts): brief is parsed.model_dump() on
+    success or None on failure. Never raises on a failed brief; the caller
+    decides what a missing brief means.
+    """
+    human_text = MARKET_BRIEF_HUMAN_TEMPLATE.format(
+        triggered_count=len(state["triggered"]),
+        total_count=len(state["comp_prices"]),
+        competitors=build_market_move_text(
+            state["comp_prices"], state["prev_comp_prices"], state["comp_ratings"],
+            state["percent_diff"], state["triggered"]
+        ),
+    )
+    messages = [SystemMessage(content=MARKET_BRIEF_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+
+    parsed, llm_errors, attempts = invoke_with_retries(get_market_brief_llm(), messages)
+
+    return (parsed.model_dump() if parsed is not None else None), llm_errors, attempts
 
 
 # ---------- Nodes ----------
@@ -365,8 +470,13 @@ def escalate_node(state: PipelineState) -> Dict:
     escalation_cause: competitor_move further by len(triggered) (2+
     simultaneous triggers -> needs_brief); cap_exceeded always needs a
     brief; llm_failed never does (the retry loop already exhausted
-    automated options, so this just surfaces the failure). brief is filled
-    in once escalation briefs are built.
+    automated options, so this just surfaces the failure).
+
+    When needs_brief, calls the matching brief (_cap_brief for cap_exceeded,
+    _market_brief for competitor_move) and adds brief_errors/brief_attempts
+    to the result; a failed brief (brief None) never raises and never
+    changes detail_pack. When needs_brief is False, brief stays None and
+    brief_errors/brief_attempts are omitted entirely.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -396,7 +506,17 @@ def escalate_node(state: PipelineState) -> Dict:
         needs_brief = False
     else:
         raise ValueError(f"unexpected escalation_cause: {cause}")
-    return {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
+
+    result = {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
+    if needs_brief:
+        if cause == "cap_exceeded":
+            brief, errors, attempts = _cap_brief(state)
+        elif cause == "competitor_move":
+            brief, errors, attempts = _market_brief(state)
+        else:
+            raise ValueError(f"unexpected escalation_cause needing a brief: {cause}")
+        result.update(brief=brief, brief_errors=errors, brief_attempts=attempts)
+    return result
 
 
 def no_action_node(state: PipelineState) -> Dict:
@@ -415,17 +535,25 @@ def reason_node(state: PipelineState) -> Dict:
     and appends clauses for any partial step or clamp that fired. Invalid
     input never reaches here, since validate_input raises before any node
     runs.
+
+    On competitor_move and cap_exceeded, appends " Brief unavailable." when
+    a brief was needed but the LLM call failed (needs_brief True, brief
+    None), so the human reviewer knows no automated brief is waiting.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
         triggered = state["triggered"]
         text = f"Escalated (high): {len(triggered)} competitor(s) moved 30% or more in one observation."
+        if state.get("needs_brief") and state.get("brief") is None:
+            text += " Brief unavailable."
         return {"reason": text}
     elif cause == "cap_exceeded":
         target_price = state["target_price"]
         x_anchor = state["x_anchor"]
         anchor = state["anchor"]
         text = f"Escalated (medium): target {target_price:.2f} is {x_anchor:+.1f}% from anchor {anchor:.2f}, beyond the ±10% monthly cap."
+        if state.get("needs_brief") and state.get("brief") is None:
+            text += " Brief unavailable."
         return {"reason": text}
     elif cause == "llm_failed":
         llm_attempts = state["llm_attempts"]

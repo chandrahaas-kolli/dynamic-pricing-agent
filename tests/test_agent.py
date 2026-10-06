@@ -4,9 +4,10 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
-    build_competitors_text,
+    build_competitors_text, describe_target, build_market_move_text,
+    _cap_brief, _market_brief,
 )
-from src.llm_schemas import StepDecision
+from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
 
 
@@ -44,6 +45,23 @@ class _FakeStepLLM:
         return self._result
 
 
+# escalate_node now calls _cap_brief/_market_brief whenever needs_brief is
+# True, which would otherwise call Bedrock for real. Autouse so every test
+# in this file gets a default success, not just the ones that mention it.
+@pytest.fixture(autouse=True)
+def _mock_brief_llms(monkeypatch):
+    cap_fake = _FakeStepLLM({
+        "parsed": CapExceededBrief(recommendation="multi_month_path", rationale="Gradual is safer."),
+        "parsing_error": None, "raw": None,
+    })
+    market_fake = _FakeStepLLM({
+        "parsed": MarketMoveBrief(likely_cause="market_shift", rationale="Both movers rose together."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: cap_fake)
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: market_fake)
+
+
 # --- escalate_node ---
 def test_escalate_node_competitor_move_single_trigger():
     state = {
@@ -66,22 +84,36 @@ def test_escalate_node_competitor_move_double_trigger():
         ],
         "comp_prices": [100, 55, 39.0],
         "prev_comp_prices": [74, 39.24, 39.24],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "percent_diff": [35.1, 40.2, -0.6],
     }
     result = escalate_node(state)
     assert result["needs_brief"] is True
 
-def test_escalate_node_cap_exceeded():
+def _cap_escalation_state(**overrides):
     state = {
         "escalation_cause": "cap_exceeded",
         "target_price": 40,
+        "target_label": "high",
         "target_source": "band",
         "anchor": 30,
         "x_anchor": 33.33,
         "current_price": 39,
         "band": {"low": 35, "mid": 57.5, "high": 80},
         "gap": -0.1,
+        "min_price": 1,
+        "max_price": 1000,
+        "our_rating": 4.0,
+        "comp_details": [
+            {"comp_price": 35, "comp_rating": 4.0},
+            {"comp_price": 80, "comp_rating": 3.5},
+        ],
     }
-    result = escalate_node(state)
+    state.update(overrides)
+    return state
+
+def test_escalate_node_cap_exceeded():
+    result = escalate_node(_cap_escalation_state())
     assert result["needs_brief"] is True
     assert set(result["detail_pack"].keys()) == {
         "target_price", "target_source", "anchor", "x_anchor", "current_price", "band", "gap",
@@ -94,6 +126,65 @@ def test_escalate_node_unknown_cause():
 def test_escalate_node_missing_cause():
     with pytest.raises(ValueError):
         escalate_node({})
+
+def test_escalate_node_cap_exceeded_brief_filled():
+    result = escalate_node(_cap_escalation_state())
+    assert result["brief"] == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
+    assert result["brief_errors"] == []
+    assert result["brief_attempts"] == 1
+
+def test_escalate_node_competitor_move_double_trigger_brief_filled():
+    state = {
+        "escalation_cause": "competitor_move",
+        "triggered": [
+            {"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1},
+            {"index": 1, "comp_price_new": 55, "comp_price_prev": 39.24, "percent_change": 40.2},
+        ],
+        "comp_prices": [100, 55, 39.0],
+        "prev_comp_prices": [74, 39.24, 39.24],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "percent_diff": [35.1, 40.2, -0.6],
+    }
+    result = escalate_node(state)
+    assert result["brief"] == {"likely_cause": "market_shift", "rationale": "Both movers rose together."}
+    assert result["brief_errors"] == []
+    assert result["brief_attempts"] == 1
+
+def test_escalate_node_competitor_move_single_trigger_no_brief_keys():
+    state = {
+        "escalation_cause": "competitor_move",
+        "triggered": [{"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1}],
+        "comp_prices": [100, 39.5, 39.0],
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    result = escalate_node(state)
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+    assert "brief_attempts" not in result
+
+def test_escalate_node_llm_failed_no_brief_keys():
+    state = {
+        "escalation_cause": "llm_failed",
+        "llm_errors": ["ThrottlingException: failure"] * 3,
+        "llm_attempts": 3,
+    }
+    result = escalate_node(state)
+    assert result["needs_brief"] is False
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+    assert "brief_attempts" not in result
+
+def test_escalate_node_cap_exceeded_brief_fails_detail_pack_unchanged(monkeypatch):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    result = escalate_node(_cap_escalation_state())
+    assert result["brief"] is None
+    assert result["brief_errors"] == ["invalid output: no structured answer"] * 3
+    assert result["brief_attempts"] == 3
+    assert set(result["detail_pack"].keys()) == {
+        "target_price", "target_source", "anchor", "x_anchor", "current_price", "band", "gap",
+    }
 
 
 # --- competitor_move_check_node ---
@@ -234,6 +325,142 @@ def test_build_competitors_text_labels():
     assert lines[2] == "- Competitor 3: price 80.00, rating 3.5 (rated lower than us)"
 
 
+# --- describe_target ---
+def test_describe_target_band():
+    assert describe_target("band", "high") == "the high point of the competitor price band, set by our rating position"
+
+def test_describe_target_tie_match():
+    assert describe_target("tie_match", "mid") == "matches the price of a competitor rated the same as us"
+
+def test_describe_target_tie_undercut():
+    assert describe_target("tie_undercut", "mid") == "just below the cheapest competitor rated higher than us"
+
+def test_describe_target_top_premium():
+    assert describe_target("top_premium", "high") == "a premium above the band's high end, because we are rated above every competitor"
+
+def test_describe_target_unknown_raises():
+    with pytest.raises(ValueError):
+        describe_target("mystery", "mid")
+
+
+# --- build_market_move_text ---
+def test_build_market_move_text_two_triggered():
+    comp_prices = [100, 55, 48]
+    prev_comp_prices = [74, 39.24, 50]
+    comp_ratings = [4.5, 4.0, 3.8]
+    percent_diff = [35.1, 40.2, -4.0]
+    triggered = [
+        {"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1},
+        {"index": 1, "comp_price_new": 55, "comp_price_prev": 39.24, "percent_change": 40.2},
+    ]
+    text = build_market_move_text(comp_prices, prev_comp_prices, comp_ratings, percent_diff, triggered)
+    lines = text.split("\n")
+    assert lines[0] == "- Competitor 1: 74.00 -> 100.00 (+35.1%), rating 4.5 [moved 30%+]"
+    assert lines[1] == "- Competitor 2: 39.24 -> 55.00 (+40.2%), rating 4.0 [moved 30%+]"
+    assert lines[2] == "- Competitor 3: 50.00 -> 48.00 (-4.0%), rating 3.8"
+
+
+# --- _cap_brief (get_cap_brief_llm mocked; no test may call Bedrock) ---
+def _cap_brief_state(**overrides):
+    state = {
+        "current_price": 90,
+        "anchor": 90,
+        "target_price": 120,
+        "x_anchor": 33.3,
+        "min_price": 50,
+        "max_price": 150,
+        "our_rating": 4.0,
+        "target_source": "band",
+        "target_label": "high",
+        "band": {"low": 100, "mid": 110, "high": 120},
+        "comp_details": [
+            {"comp_price": 100, "comp_rating": 4.5},
+            {"comp_price": 120, "comp_rating": 3.5},
+        ],
+    }
+    state.update(overrides)
+    return state
+
+def test_cap_brief_success(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": CapExceededBrief(recommendation="multi_month_path", rationale="Gradual is safer."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    brief, errors, attempts = _cap_brief(_cap_brief_state())
+    assert brief == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
+    assert errors == []
+    assert attempts == 1
+
+def test_cap_brief_three_failures_returns_none(monkeypatch):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    brief, errors, attempts = _cap_brief(_cap_brief_state())
+    assert brief is None
+    assert errors == ["invalid output: no structured answer"] * 3
+    assert attempts == 3
+
+def test_cap_brief_human_message_contains_months_and_target_reason(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": CapExceededBrief(recommendation="one_time_jump", rationale="Close enough."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    state = _cap_brief_state()
+    _cap_brief(state)
+    human_text = fake.messages[1].content
+    assert "Months needed at the cap: 4" in human_text
+    assert describe_target(state["target_source"], state["target_label"]) in human_text
+
+
+# --- _market_brief (get_market_brief_llm mocked; no test may call Bedrock) ---
+def _market_brief_state(**overrides):
+    state = {
+        "comp_prices": [100, 55, 48],
+        "prev_comp_prices": [74, 39.24, 50],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "percent_diff": [35.1, 40.2, -4.0],
+        "triggered": [
+            {"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1},
+            {"index": 1, "comp_price_new": 55, "comp_price_prev": 39.24, "percent_change": 40.2},
+        ],
+    }
+    state.update(overrides)
+    return state
+
+def test_market_brief_success(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": MarketMoveBrief(likely_cause="market_shift", rationale="Both movers rose together."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
+    brief, errors, attempts = _market_brief(_market_brief_state())
+    assert brief == {"likely_cause": "market_shift", "rationale": "Both movers rose together."}
+    assert errors == []
+    assert attempts == 1
+
+def test_market_brief_three_failures_returns_none(monkeypatch):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    brief, errors, attempts = _market_brief(_market_brief_state())
+    assert brief is None
+    assert errors == ["invalid output: no structured answer"] * 3
+    assert attempts == 3
+
+def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch):
+    fake = _FakeStepLLM({
+        "parsed": MarketMoveBrief(likely_cause="market_shift", rationale="Both movers rose together."),
+        "parsing_error": None, "raw": None,
+    })
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
+    _market_brief(_market_brief_state())
+    human_text = fake.messages[1].content
+    assert "Competitors that moved 30% or more in this observation: 2 of 3" in human_text
+    assert "- Competitor 1: 74.00 -> 100.00 (+35.1%), rating 4.5 [moved 30%+]" in human_text
+
+
 # --- app.invoke, graph-level ---
 base = {
     "product_id": "g4",
@@ -261,6 +488,22 @@ def test_app_invoke_cap_exceeded():
     result = app.invoke(proceed)
     assert result["escalation_cause"] == "cap_exceeded"
     assert result["needs_brief"] is True
+    assert "price" not in result
+
+def test_app_invoke_cap_exceeded_brief_fails_reason_unavailable(monkeypatch):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 30}
+    result = app.invoke(proceed)
+    assert result["reason"].endswith("Brief unavailable.")
     assert "price" not in result
 
 
@@ -338,6 +581,55 @@ def test_reason_node_cap_exceeded_negative_x_anchor():
     result = reason_node(state)
     assert "-25.0%" in result["reason"]
     assert "±10%" in result["reason"]
+
+def test_reason_node_cap_exceeded_brief_unavailable():
+    state = {
+        "escalation_cause": "cap_exceeded",
+        "target_price": 30,
+        "anchor": 40,
+        "x_anchor": -25.0,
+        "needs_brief": True,
+        "brief": None,
+    }
+    result = reason_node(state)
+    assert result["reason"].endswith("Brief unavailable.")
+
+def test_reason_node_cap_exceeded_brief_present_no_unavailable_clause():
+    state = {
+        "escalation_cause": "cap_exceeded",
+        "target_price": 30,
+        "anchor": 40,
+        "x_anchor": -25.0,
+        "needs_brief": True,
+        "brief": {"recommendation": "multi_month_path", "rationale": "x"},
+    }
+    result = reason_node(state)
+    assert "Brief unavailable" not in result["reason"]
+
+def test_reason_node_competitor_move_two_triggered_brief_unavailable():
+    state = {
+        "escalation_cause": "competitor_move",
+        "triggered": [
+            {"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1},
+            {"index": 1, "comp_price_new": 55, "comp_price_prev": 39.24, "percent_change": 40.2},
+        ],
+        "needs_brief": True,
+        "brief": None,
+    }
+    result = reason_node(state)
+    assert result["reason"].endswith("Brief unavailable.")
+
+def test_reason_node_competitor_move_one_triggered_no_unavailable_clause():
+    state = {
+        "escalation_cause": "competitor_move",
+        "triggered": [
+            {"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1},
+        ],
+        "needs_brief": False,
+        "brief": None,
+    }
+    result = reason_node(state)
+    assert "Brief unavailable" not in result["reason"]
 
 def test_reason_node_llm_failed_exact_text():
     state = {

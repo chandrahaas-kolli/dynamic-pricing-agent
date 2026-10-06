@@ -129,6 +129,8 @@ def test_competitor_move_check_trigger():
     result = competitor_move_check("g4", [140, 120, 90], [100, 100, 100])
     assert result["action"] == "trigger"
     assert result["tier"] == "high"
+    # percent_diff covers every competitor, not just the one(s) that triggered
+    assert len(result["percent_diff"]) == 3
 
 def test_competitor_move_check_boundary_proceed():
     # exactly 2% -> should still count as "moved" (>=2), not fall below the deadband
