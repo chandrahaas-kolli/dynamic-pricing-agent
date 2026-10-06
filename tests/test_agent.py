@@ -476,6 +476,19 @@ def test_app_invoke_double_trigger():
     assert result["escalation_cause"] == "competitor_move"
     assert result["needs_brief"] is True
 
+def test_app_invoke_double_trigger_brief_filled():
+    result = app.invoke({**base, "comp_prices": [100, 55, 39.0],
+                          "prev_comp_prices": [74, 39.24, 39.24]})
+    assert result["brief"] == {"likely_cause": "market_shift", "rationale": "Both movers rose together."}
+    assert result["brief_errors"] == []
+    assert result["brief_attempts"] == 1
+
+def test_app_invoke_single_trigger_no_brief():
+    result = app.invoke({**base, "comp_prices": [100, 39.5, 39.0],
+                          "prev_comp_prices": [74, 39.24, 39.24]})
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+
 def test_app_invoke_cap_exceeded():
     proceed = {**base, "comp_prices": [80, 40, 35],
                "prev_comp_prices": [74, 39.24, 39.24],
@@ -488,6 +501,22 @@ def test_app_invoke_cap_exceeded():
     result = app.invoke(proceed)
     assert result["escalation_cause"] == "cap_exceeded"
     assert result["needs_brief"] is True
+    assert "price" not in result
+
+def test_app_invoke_cap_exceeded_brief_filled():
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 30}
+    result = app.invoke(proceed)
+    assert result["brief"] == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
+    assert result["brief_errors"] == []
+    assert result["brief_attempts"] == 1
+    assert "Brief unavailable" not in result["reason"]
     assert "price" not in result
 
 def test_app_invoke_cap_exceeded_brief_fails_reason_unavailable(monkeypatch):
