@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
@@ -5,7 +7,7 @@ from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
     build_competitors_text, describe_target, build_market_move_text,
-    _cap_brief, _market_brief,
+    _cap_brief, _market_brief, get_connection,
 )
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
@@ -60,6 +62,26 @@ def _mock_brief_llms(monkeypatch):
     })
     monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: cap_fake)
     monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: market_fake)
+
+
+# --- get_connection ---
+def test_get_connection_lazy_then_creates_both_tables(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "staging.db")
+    monkeypatch.setattr("src.agent.STAGING_DB_PATH", db_path)
+    get_connection.cache_clear()
+
+    assert not os.path.exists(db_path)
+
+    conn = get_connection()
+    try:
+        assert os.path.exists(db_path)
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert tables == {"decisions", "monthly_state"}
+    finally:
+        conn.close()
+        get_connection.cache_clear()
 
 
 # --- escalate_node ---

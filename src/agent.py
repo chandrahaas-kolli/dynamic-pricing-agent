@@ -22,6 +22,7 @@ Flow:
 A persist node will later sit between reason and END on every path.
 """
 
+import sqlite3
 import time
 from functools import lru_cache
 from typing import Dict
@@ -31,7 +32,8 @@ from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 
-from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION
+from src import staging
+from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION, STAGING_DB_PATH
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.prompts import (
     STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT,
@@ -80,6 +82,19 @@ def get_market_brief_llm():
     """Return the market-move brief model, created on first use and reused afterwards."""
     llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
     return llm.with_structured_output(MarketMoveBrief, include_raw=True)
+
+
+@lru_cache(maxsize=1)
+def get_connection():
+    """Return the staging DB connection, opened on first use and reused afterwards.
+
+    Created lazily so importing this module never touches the filesystem,
+    which keeps tests and CI independent of a staging.db on disk; tests
+    patch this the same way they patch get_step_llm.
+    """
+    conn = sqlite3.connect(STAGING_DB_PATH)
+    staging.init_db(conn)
+    return conn
 
 
 def build_competitors_text(our_rating, comp_details):
