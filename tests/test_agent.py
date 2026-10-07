@@ -1,8 +1,11 @@
+import json
 import os
+import sqlite3
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 
+from src import staging
 from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
@@ -62,6 +65,18 @@ def _mock_brief_llms(monkeypatch):
     })
     monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: cap_fake)
     monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: market_fake)
+
+
+# persist_node now calls get_connection() on every run, which would otherwise
+# open (and create) data/staging.db. Autouse so every test gets a fresh
+# in-memory DB instead, and no test writes to the real file.
+@pytest.fixture(autouse=True)
+def _mock_staging_db(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    staging.init_db(conn)
+    monkeypatch.setattr("src.agent.get_connection", lambda: conn)
+    yield conn
+    conn.close()
 
 
 # --- get_connection ---
@@ -976,3 +991,83 @@ def test_escalate_node_llm_failed():
     result = escalate_node(state)
     assert result["needs_brief"] is False
     assert result["detail_pack"] == {"llm_errors": state["llm_errors"], "llm_attempts": 3}
+
+
+# --- persist_node, graph-level via app.invoke (staging DB mocked by _mock_staging_db) ---
+def test_app_invoke_persists_priced_decision_and_monthly_state(_mock_staging_db):
+    conn = _mock_staging_db
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 37}
+    result = app.invoke(proceed)
+    outcome, price = conn.execute("SELECT outcome, price FROM decisions").fetchone()
+    assert outcome == "priced"
+    assert price == result["price"]
+    state = conn.execute(
+        "SELECT anchor_price, current_price FROM monthly_state WHERE product_id = ? AND month = ?",
+        (result["product_id"], "2018-09"),
+    ).fetchone()
+    assert state == (37.0, result["price"])
+
+def test_app_invoke_persists_cap_exceeded_escalation(_mock_staging_db):
+    conn = _mock_staging_db
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 30}
+    app.invoke(proceed)
+    outcome, price, brief_json = conn.execute("SELECT outcome, price, brief FROM decisions").fetchone()
+    assert outcome == "escalated"
+    assert price is None
+    assert json.loads(brief_json) == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
+    pending_escalation = conn.execute(
+        "SELECT pending_escalation FROM monthly_state WHERE product_id = ? AND month = ?",
+        ("g4", "2018-09"),
+    ).fetchone()[0]
+    assert bool(pending_escalation) is True
+
+def test_app_invoke_persists_no_change_decision(_mock_staging_db):
+    conn = _mock_staging_db
+    app.invoke({**base, "comp_prices": [101, 100, 99], "prev_comp_prices": [100, 100, 100]})
+    outcome, price = conn.execute("SELECT outcome, price FROM decisions").fetchone()
+    assert outcome == "no_change"
+    assert price is None
+
+def test_app_invoke_escalate_then_no_change_keeps_pending_escalation(_mock_staging_db):
+    conn = _mock_staging_db
+    escalate_proceed = {**base, "comp_prices": [80, 40, 35],
+                         "prev_comp_prices": [74, 39.24, 39.24],
+                         "comp_ratings": [4.5, 4.0, 3.8],
+                         "our_rating": 4.0,
+                         "current_price": 39,
+                         "min_price": 1,
+                         "max_price": 1000,
+                         "anchor": 30}
+    app.invoke(escalate_proceed)
+
+    no_change_proceed = {**base, "comp_prices": [80, 40, 35],
+                          "prev_comp_prices": [74, 39.24, 39.24],
+                          "comp_ratings": [4.5, 4.0, 3.8],
+                          "our_rating": 4.0,
+                          "current_price": 40,
+                          "min_price": 1,
+                          "max_price": 1000,
+                          "anchor": 38}
+    result = app.invoke(no_change_proceed)
+    assert round(result["price"], 2) == round(result["current_price"], 2)
+
+    pending_escalation, anchor_price = conn.execute(
+        "SELECT pending_escalation, anchor_price FROM monthly_state WHERE product_id = ? AND month = ?",
+        ("g4", "2018-09"),
+    ).fetchone()
+    assert bool(pending_escalation) is True
+    assert anchor_price == 30.0

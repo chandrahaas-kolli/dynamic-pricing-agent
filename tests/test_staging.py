@@ -61,3 +61,10 @@ def test_upsert_monthly_state_updates_current_price_and_pending_not_anchor(conn)
 
 def test_get_monthly_state_missing_returns_none(conn):
     assert get_monthly_state(conn, "missing", "2018-09") is None
+
+
+def test_upsert_monthly_state_pending_escalation_never_clears_on_its_own(conn):
+    upsert_monthly_state(conn, "g4", "2018-09", 30.0, 30.0, 1)
+    upsert_monthly_state(conn, "g4", "2018-09", 30.0, 31.0, 0)
+    state = get_monthly_state(conn, "g4", "2018-09")
+    assert state["pending_escalation"] is True

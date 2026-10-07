@@ -6,20 +6,18 @@ graph nodes and wires them together in execution order.
 
 Flow:
     START -> validate_input -> competitor_move_check -> route on action:
-        trigger -> escalate_node (escalation_cause=competitor_move) -> reason -> END
-        none    -> no_action_node -> reason -> END
+        trigger -> escalate_node (escalation_cause=competitor_move) -> reason -> persist -> END
+        none    -> no_action_node -> reason -> persist -> END
         proceed -> pair_competitors -> analyze_position -> resolve_target_price
                    -> check_move_size -> route on path
                       (llm is overridden to direct for tie targets):
-                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> END
+                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> persist -> END
                        llm      -> llm_step_size -> route on outcome:
                                        escalate (escalation_cause=llm_failed)
-                                           -> escalate_node -> reason -> END
+                                           -> escalate_node -> reason -> persist -> END
                                        compute_step -> compute_step
-                                           -> apply_dominance_clamp -> enforce_bounds -> reason -> END
-                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> END
-
-A persist node will later sit between reason and END on every path.
+                                           -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
+                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
 """
 
 import sqlite3
@@ -633,6 +631,49 @@ def reason_node(state: PipelineState) -> Dict:
     return {"reason": text}
 
 
+def persist_node(state: PipelineState) -> Dict:
+    """Write this run's decision, and its monthly state if priced, to the staging DB.
+
+    outcome is 'escalated' when escalation_cause is set, 'no_change' when
+    action is 'none' or the priced price didn't move the current price,
+    otherwise 'priced'. Runs on every path as the graph's last node.
+
+    monthly_state is only written when both anchor and current_price are in
+    state (the paths that reached check_move_size): anchor_price is frozen
+    to state's anchor; current_price updates to the new price only when
+    outcome is 'priced', otherwise it's left at current_price (no move).
+    pending_escalation reflects only this run's own escalation;
+    upsert_monthly_state's MAX makes sure an earlier pending escalation is
+    never cleared by a later, non-escalating run.
+    """
+    conn = get_connection()
+
+    if state.get("escalation_cause"):
+        outcome = "escalated"
+    elif state.get("action") == "none":
+        outcome = "no_change"
+    elif round(state["price"], 2) == round(state["current_price"], 2):
+        outcome = "no_change"
+    else:
+        outcome = "priced"
+
+    staging.record_decision(
+        conn, state["product_id"], state["observed_at"], outcome,
+        state.get("price"), state.get("escalation_cause"), state.get("tier"),
+        state["reason"], state.get("brief"),
+    )
+
+    if "anchor" in state and "current_price" in state:
+        month = state["observed_date"].strftime("%Y-%m")
+        current_price = state["price"] if outcome == "priced" else state["current_price"]
+        staging.upsert_monthly_state(
+            conn, state["product_id"], month, state["anchor"], current_price,
+            outcome == "escalated",
+        )
+
+    return {}
+
+
 # ---------- Routing ----------
 
 def route_comp_move_check(state: PipelineState) -> str:
@@ -677,6 +718,7 @@ graph.add_node("enforce_bounds_node", enforce_bounds_node)
 graph.add_node("escalate_node", escalate_node)
 graph.add_node("no_action_node", no_action_node)
 graph.add_node("reason_node", reason_node)
+graph.add_node("persist_node", persist_node)
 
 graph.add_edge(START, "validate_input_node")
 graph.add_edge("validate_input_node", "competitor_move_check_node")
@@ -712,6 +754,7 @@ graph.add_edge("enforce_bounds_node", "reason_node")
 graph.add_edge("escalate_node", "reason_node")
 graph.add_edge("no_action_node", "reason_node")
 
-graph.add_edge("reason_node", END)
+graph.add_edge("reason_node", "persist_node")
+graph.add_edge("persist_node", END)
 
 app = graph.compile()

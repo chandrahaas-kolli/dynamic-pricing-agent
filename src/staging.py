@@ -64,7 +64,9 @@ def upsert_monthly_state(conn, product_id, month, anchor_price, current_price, p
     """Insert the monthly state row for product_id/month, or update it if it already exists.
 
     anchor_price is frozen for the month once set: on conflict, only
-    current_price and pending_escalation are updated.
+    current_price and pending_escalation are updated. pending_escalation is
+    set to MAX(existing, new) on conflict, so a later run can never clear a
+    pending escalation on its own; only a human resolving it can (step 12).
     """
     with conn:
         conn.execute(
@@ -74,7 +76,7 @@ def upsert_monthly_state(conn, product_id, month, anchor_price, current_price, p
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (product_id, month) DO UPDATE SET
                 current_price = excluded.current_price,
-                pending_escalation = excluded.pending_escalation
+                pending_escalation = MAX(monthly_state.pending_escalation, excluded.pending_escalation)
             """,
             (product_id, month, anchor_price, current_price, pending_escalation),
         )
