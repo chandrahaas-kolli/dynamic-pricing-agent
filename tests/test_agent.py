@@ -80,7 +80,7 @@ def _mock_staging_db(monkeypatch):
 
 
 # --- get_connection ---
-def test_get_connection_lazy_then_creates_both_tables(tmp_path, monkeypatch):
+def test_get_connection_lazy_then_creates_all_tables(tmp_path, monkeypatch):
     db_path = str(tmp_path / "staging.db")
     monkeypatch.setattr("src.agent.STAGING_DB_PATH", db_path)
     get_connection.cache_clear()
@@ -93,7 +93,7 @@ def test_get_connection_lazy_then_creates_both_tables(tmp_path, monkeypatch):
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        assert tables == {"decisions", "monthly_state"}
+        assert tables == {"decisions", "monthly_state", "escalations"}
     finally:
         conn.close()
         get_connection.cache_clear()
@@ -1029,11 +1029,7 @@ def test_app_invoke_persists_cap_exceeded_escalation(_mock_staging_db):
     assert outcome == "escalated"
     assert price is None
     assert json.loads(brief_json) == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
-    pending_escalation = conn.execute(
-        "SELECT pending_escalation FROM monthly_state WHERE product_id = ? AND month = ?",
-        ("g4", "2018-09"),
-    ).fetchone()[0]
-    assert bool(pending_escalation) is True
+    assert staging.has_open_escalation(conn, "g4") is True
 
 def test_app_invoke_persists_no_change_decision(_mock_staging_db):
     conn = _mock_staging_db
@@ -1042,7 +1038,32 @@ def test_app_invoke_persists_no_change_decision(_mock_staging_db):
     assert outcome == "no_change"
     assert price is None
 
-def test_app_invoke_escalate_then_no_change_keeps_pending_escalation(_mock_staging_db):
+def test_app_invoke_escalated_run_opens_escalation_priced_run_does_not(_mock_staging_db):
+    conn = _mock_staging_db
+    priced_proceed = {**base, "comp_prices": [80, 40, 35],
+                       "prev_comp_prices": [74, 39.24, 39.24],
+                       "comp_ratings": [4.5, 4.0, 3.8],
+                       "our_rating": 4.0,
+                       "current_price": 39,
+                       "min_price": 1,
+                       "max_price": 1000,
+                       "anchor": 37}
+    app.invoke(priced_proceed)
+    assert staging.has_open_escalation(conn, "g4") is False
+
+    cap_exceeded_proceed = {**base, "observed_at": "02-09-2018 10:00",
+                             "comp_prices": [80, 40, 35],
+                             "prev_comp_prices": [74, 39.24, 39.24],
+                             "comp_ratings": [4.5, 4.0, 3.8],
+                             "our_rating": 4.0,
+                             "current_price": 39,
+                             "min_price": 1,
+                             "max_price": 1000,
+                             "anchor": 30}
+    app.invoke(cap_exceeded_proceed)
+    assert staging.has_open_escalation(conn, "g4") is True
+
+def test_app_invoke_escalate_then_no_change_keeps_escalation_open(_mock_staging_db):
     conn = _mock_staging_db
     escalate_proceed = {**base, "comp_prices": [80, 40, 35],
                          "prev_comp_prices": [74, 39.24, 39.24],
@@ -1054,7 +1075,10 @@ def test_app_invoke_escalate_then_no_change_keeps_pending_escalation(_mock_stagi
                          "anchor": 30}
     app.invoke(escalate_proceed)
 
-    no_change_proceed = {**base, "comp_prices": [80, 40, 35],
+    # A later observed_at: a distinct observation of the same product, not a
+    # re-run of the same one (which the decisions UNIQUE constraint rejects).
+    no_change_proceed = {**base, "observed_at": "05-09-2018 10:00",
+                          "comp_prices": [80, 40, 35],
                           "prev_comp_prices": [74, 39.24, 39.24],
                           "comp_ratings": [4.5, 4.0, 3.8],
                           "our_rating": 4.0,
@@ -1065,9 +1089,10 @@ def test_app_invoke_escalate_then_no_change_keeps_pending_escalation(_mock_stagi
     result = app.invoke(no_change_proceed)
     assert round(result["price"], 2) == round(result["current_price"], 2)
 
-    pending_escalation, anchor_price = conn.execute(
-        "SELECT pending_escalation, anchor_price FROM monthly_state WHERE product_id = ? AND month = ?",
+    anchor_price = conn.execute(
+        "SELECT anchor_price FROM monthly_state WHERE product_id = ? AND month = ?",
         ("g4", "2018-09"),
-    ).fetchone()
-    assert bool(pending_escalation) is True
+    ).fetchone()[0]
     assert anchor_price == 30.0
+    # Nothing in persist_node resolves escalations; only a human does (step 12).
+    assert staging.has_open_escalation(conn, "g4") is True

@@ -642,9 +642,9 @@ def persist_node(state: PipelineState) -> Dict:
     state (the paths that reached check_move_size): anchor_price is frozen
     to state's anchor; current_price updates to the new price only when
     outcome is 'priced', otherwise it's left at current_price (no move).
-    pending_escalation reflects only this run's own escalation;
-    upsert_monthly_state's MAX makes sure an earlier pending escalation is
-    never cleared by a later, non-escalating run.
+
+    When outcome is 'escalated', also opens a new escalation row for the
+    human to resolve later (step 12).
     """
     conn = get_connection()
 
@@ -666,10 +666,10 @@ def persist_node(state: PipelineState) -> Dict:
     if "anchor" in state and "current_price" in state:
         month = state["observed_date"].strftime("%Y-%m")
         current_price = state["price"] if outcome == "priced" else state["current_price"]
-        staging.upsert_monthly_state(
-            conn, state["product_id"], month, state["anchor"], current_price,
-            outcome == "escalated",
-        )
+        staging.upsert_monthly_state(conn, state["product_id"], month, state["anchor"], current_price)
+
+    if outcome == "escalated":
+        staging.open_escalation(conn, state["product_id"], state["escalation_cause"])
 
     return {}
 
