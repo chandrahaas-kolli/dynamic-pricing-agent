@@ -502,7 +502,7 @@ def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch
 base = {
     "product_id": "g4",
     "comp_ratings": [3.9, 4, 4],
-    "observed_at": "01-09-2018",
+    "observed_at": "01-09-2018 10:00",
     "last_observed_mon_yr": "01-08-2018",
     "cleared_comp": None,
 }

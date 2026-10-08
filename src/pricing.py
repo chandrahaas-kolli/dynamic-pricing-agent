@@ -3,6 +3,9 @@ from math import ceil, log
 
 from dateutil.relativedelta import relativedelta
 
+OBSERVED_AT_FORMAT = "%d-%m-%Y %H:%M"
+LAST_OBSERVED_FORMAT = "%d-%m-%Y"
+
 
 def validate_prices(product_id, comp_prices):
     """Check competitor prices are well-formed. Raises ValueError if not."""
@@ -35,22 +38,33 @@ def validate_ratings(product_id, comp_ratings):
 
 
 def validate_observed_at(product_id, observed_at):
-    """Check observed_at is a parseable date in DD-MM-YYYY format. Raises ValueError if not."""
+    """Check observed_at is a parseable timestamp in DD-MM-YYYY HH:MM format. Raises ValueError if not."""
     try:
-        return datetime.strptime(observed_at, "%d-%m-%Y")
+        return datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
     except ValueError:
         raise ValueError(
-            f'Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY'
+            f'Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY HH:MM'
+        )
+
+
+def validate_last_observed_mon_yr(product_id, last_observed_mon_yr):
+    """Check last_observed_mon_yr is a parseable date in DD-MM-YYYY format. Raises ValueError if not."""
+    try:
+        return datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
+    except ValueError:
+        raise ValueError(
+            f'Invalid last_observed_mon_yr for {product_id}: {last_observed_mon_yr!r}, expected format DD-MM-YYYY'
         )
 
 
 def check_continuity(product_id, last_observed_mon_yr, observed_at):
     """Check observed_at is the same month as the last observation or the next one.
 
-    Raises ValueError if not. Assumes observed_at is already validated.
+    Raises ValueError if not. Assumes observed_at (DD-MM-YYYY HH:MM) and
+    last_observed_mon_yr (DD-MM-YYYY) are already validated.
     """
-    prev = datetime.strptime(last_observed_mon_yr, "%d-%m-%Y")
-    new = datetime.strptime(observed_at, "%d-%m-%Y")
+    prev = datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
+    new = datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
     next_month = prev + relativedelta(months=1)
 
     same_month = (new.year == prev.year and new.month == prev.month)
@@ -70,7 +84,7 @@ def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obse
     validate_prices(product_id, prev_comp_prices)
     validate_ratings(product_id, comp_ratings)
     validate_observed_at(product_id, observed_at)
-    validate_observed_at(product_id, last_observed_mon_yr)
+    validate_last_observed_mon_yr(product_id, last_observed_mon_yr)
     parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)
 
     return parsed_date

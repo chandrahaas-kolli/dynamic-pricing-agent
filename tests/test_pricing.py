@@ -50,60 +50,72 @@ def test_validate_ratings_exactly_five_valid():
 
 # --- validate_observed_at ---
 def test_validate_observed_at_valid():
-    result = validate_observed_at("g4", "01-08-2017")
+    result = validate_observed_at("g4", "01-08-2017 10:00")
     assert result.year == 2017 and result.month == 8
 
 def test_validate_observed_at_bad_format():
     with pytest.raises(ValueError):
         validate_observed_at("g4", "not-a-date")
 
+def test_validate_observed_at_no_time_raises():
+    with pytest.raises(ValueError):
+        validate_observed_at("g4", "01-09-2018")
+
+def test_validate_observed_at_invalid_time_raises():
+    with pytest.raises(ValueError):
+        validate_observed_at("g4", "01-09-2018 25:00")
+
 
 # --- check_continuity ---
 def test_check_continuity_same_month():
-    result = check_continuity("g4", "01-08-2026", "01-08-2026")
+    result = check_continuity("g4", "01-08-2026", "01-08-2026 10:00")
     assert result.month == 8
 
 def test_check_continuity_next_month():
-    result = check_continuity("g4", "01-08-2026", "01-09-2026")
+    result = check_continuity("g4", "01-08-2026", "01-09-2026 10:00")
     assert result.month == 9
 
 def test_check_continuity_year_rollover():
-    result = check_continuity("g4", "01-12-2026", "01-01-2027")
+    result = check_continuity("g4", "01-12-2026", "01-01-2027 10:00")
     assert result.year == 2027 and result.month == 1
 
 def test_check_continuity_skip_rejected():
     with pytest.raises(ValueError):
-        check_continuity("g4", "01-08-2026", "01-11-2026")
+        check_continuity("g4", "01-08-2026", "01-11-2026 10:00")
 
 def test_check_continuity_same_month_different_year_rejected():
     with pytest.raises(ValueError):
-        check_continuity("g4", "01-08-2025", "01-08-2026")
+        check_continuity("g4", "01-08-2025", "01-08-2026 10:00")
+
+def test_check_continuity_across_month_boundary_with_timestamps():
+    result = check_continuity("g4", "31-08-2026", "01-09-2026 00:05")
+    assert result.year == 2026 and result.month == 9 and result.day == 1 and result.hour == 0 and result.minute == 5
 
 
 # --- validate_input ---
 def test_validate_input_success():
-    result = validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026", "01-08-2026", [100, 110, 95])
+    result = validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
     assert result.month == 9
 
 def test_validate_input_bad_prices_raises():
     with pytest.raises(ValueError):
-        validate_input("bed4", [105, 120], [4.2, 4.0, 4.1], "01-09-2026", "01-08-2026", [100, 110, 95])
+        validate_input("bed4", [105, 120], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
 
 def test_validate_input_bad_continuity_raises():
     with pytest.raises(ValueError):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-11-2026", "01-08-2026", [100, 110, 95])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-11-2026 10:00", "01-08-2026", [100, 110, 95])
 
 def test_validate_input_prev_prices_contains_zero():
     with pytest.raises(ValueError, match="must be greater than 0"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026", "01-08-2026", [100, 0, 95])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 0, 95])
 
 def test_validate_input_prev_prices_wrong_count():
     with pytest.raises(ValueError, match="must have 3 values"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026", "01-08-2026", [100, 110])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110])
 
 def test_validate_input_bad_last_observed_format():
-    with pytest.raises(ValueError, match="expected format DD-MM-YYYY"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026", "not-a-date", [100, 110, 95])
+    with pytest.raises(ValueError, match="Invalid last_observed_mon_yr"):
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "not-a-date", [100, 110, 95])
 
 
 # --- pair_competitors ---
