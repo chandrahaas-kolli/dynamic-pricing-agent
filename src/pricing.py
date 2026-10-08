@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime
 from math import ceil, log
 
@@ -88,6 +90,24 @@ def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_obse
     parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)
 
     return parsed_date
+
+
+def observation_fingerprint(comp_prices, comp_ratings, our_rating):
+    """Return a SHA-256 hex fingerprint of the observed inputs.
+
+    Only data the outside world reports is hashed (comp prices, comp ratings,
+    our rating), normalized to floats rounded to 2dp so 80 and 80.0 match.
+    Agent-set state (current_price, anchor, prev_comp_prices,
+    last_observed_mon_yr) is excluded on purpose: it changes after a run, so
+    including it would make a genuine resend look like a data conflict.
+    """
+    comp_prices = [round(float(comp_price), 2) for comp_price in comp_prices]
+    comp_ratings = [round(float(comp_rating), 2) for comp_rating in comp_ratings]
+    our_rating = round(float(our_rating), 2)
+    data = {"comp_prices": comp_prices, "comp_ratings": comp_ratings, "our_rating": our_rating}
+    text = json.dumps(data, sort_keys=True)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    return digest
 
 
 def pair_competitors(product_id, comp_prices, comp_ratings):

@@ -4,6 +4,7 @@ from src.pricing import (
     validate_input, pair_competitors, competitor_move_check, build_band,
     rating_gap, choose_target, resolve_target_price, check_move_size,
     compute_step, apply_dominance_clamp, enforce_bounds, months_to_reach,
+    observation_fingerprint,
 )
 
 
@@ -116,6 +117,38 @@ def test_validate_input_prev_prices_wrong_count():
 def test_validate_input_bad_last_observed_format():
     with pytest.raises(ValueError, match="Invalid last_observed_mon_yr"):
         validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "not-a-date", [100, 110, 95])
+
+
+# --- observation_fingerprint ---
+def test_observation_fingerprint_same_inputs_same_hash():
+    a = observation_fingerprint([80, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    b = observation_fingerprint([80, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    assert a == b
+
+def test_observation_fingerprint_changed_comp_price_different_hash():
+    a = observation_fingerprint([80, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    b = observation_fingerprint([80, 40.5, 35], [4.5, 4.0, 3.8], 4.0)
+    assert a != b
+
+def test_observation_fingerprint_competitor_order_swapped_different_hash():
+    a = observation_fingerprint([80, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    b = observation_fingerprint([40, 80, 35], [4.0, 4.5, 3.8], 4.0)
+    assert a != b
+
+def test_observation_fingerprint_result_is_64_char_str():
+    result = observation_fingerprint([80, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    assert isinstance(result, str)
+    assert len(result) == 64
+
+def test_observation_fingerprint_int_vs_float_same_hash():
+    a = observation_fingerprint([80, 40, 35], [4, 4, 4], 4)
+    b = observation_fingerprint([80.0, 40.0, 35.0], [4.0, 4.0, 4.0], 4.0)
+    assert a == b
+
+def test_observation_fingerprint_float_noise_same_hash():
+    a = observation_fingerprint([39.24, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    b = observation_fingerprint([39.24000000000001, 40, 35], [4.5, 4.0, 3.8], 4.0)
+    assert a == b
 
 
 # --- pair_competitors ---
