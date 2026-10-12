@@ -10,13 +10,13 @@ LAST_OBSERVED_FORMAT = "%d-%m-%Y"
 
 
 def validate_prices(product_id, comp_prices):
-    """Check competitor prices are well-formed. Raises ValueError if not."""
+    """Check competitor prices are well-formed. Raises TypeError or ValueError if not."""
 
     if len(comp_prices) != 3:
         raise ValueError(f'Invalid competitor prices for {product_id}: {comp_prices}, must have 3 values')
 
     for comp in comp_prices:
-        if not isinstance(comp, (int, float)):
+        if isinstance(comp, bool) or not isinstance(comp, (int, float)):
             raise TypeError(f'Invalid datatype for competitor price for {product_id}: {comp!r}, must be a number')
         elif comp <= 0:
             raise ValueError(f'Invalid entry for competitor price for {product_id}: {comp}, must be greater than 0')
@@ -25,18 +25,29 @@ def validate_prices(product_id, comp_prices):
 
 
 def validate_ratings(product_id, comp_ratings):
-    """Check competitor ratings are well-formed. Raises ValueError if not."""
+    """Check competitor ratings are well-formed. Raises TypeError or ValueError if not."""
 
     if len(comp_ratings) != 3:
         raise ValueError(f'Invalid number of ratings for {product_id}: {len(comp_ratings)}, must be exactly 3')
 
     for rating in comp_ratings:
-        if not isinstance(rating, (int, float)):
+        if isinstance(rating, bool) or not isinstance(rating, (int, float)):
             raise TypeError(f'Invalid rating type for {product_id}: {rating!r}, must be a number')
         elif rating <= 0 or rating > 5.0:
             raise ValueError(f'Invalid rating value for {product_id}: {rating}, must be in range (0, 5.0]')
 
     return comp_ratings
+
+
+def validate_our_rating(product_id, our_rating):
+    """Check our_rating is well-formed. Raises TypeError or ValueError if not."""
+
+    if isinstance(our_rating, bool) or not isinstance(our_rating, (int, float)):
+        raise TypeError(f'Invalid our_rating type for {product_id}: {our_rating!r}, must be a number')
+    elif our_rating <= 0 or our_rating > 5.0:
+        raise ValueError(f'Invalid our_rating value for {product_id}: {our_rating}, must be in range (0, 5.0]')
+
+    return our_rating
 
 
 def validate_observed_at(product_id, observed_at):
@@ -81,10 +92,15 @@ def check_continuity(product_id, last_observed_mon_yr, observed_at):
     return new
 
 
-def validate_input(product_id, comp_prices, comp_ratings, observed_at, last_observed_mon_yr, prev_comp_prices):
+def validate_input(product_id, comp_prices, comp_ratings, our_rating, observed_at, last_observed_mon_yr, prev_comp_prices):
+    """Validate every raw input: competitor and previous competitor prices, competitor
+    ratings, our_rating, observed_at, last_observed_mon_yr, and their continuity.
+    Raises ValueError/TypeError if any is invalid; returns the parsed observed_at.
+    """
     validate_prices(product_id, comp_prices)
     validate_prices(product_id, prev_comp_prices)
     validate_ratings(product_id, comp_ratings)
+    validate_our_rating(product_id, our_rating)
     validate_observed_at(product_id, observed_at)
     validate_last_observed_mon_yr(product_id, last_observed_mon_yr)
     parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)

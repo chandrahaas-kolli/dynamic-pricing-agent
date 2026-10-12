@@ -1,6 +1,6 @@
 import pytest
 from src.pricing import (
-    validate_prices, validate_ratings, validate_observed_at, check_continuity,
+    validate_prices, validate_ratings, validate_our_rating, validate_observed_at, check_continuity,
     validate_input, pair_competitors, competitor_move_check, build_band,
     rating_gap, choose_target, resolve_target_price, check_move_size,
     compute_step, apply_dominance_clamp, enforce_bounds, months_to_reach,
@@ -24,6 +24,10 @@ def test_validate_prices_wrong_type():
     with pytest.raises(TypeError):
         validate_prices("g4", [105, "90", 90])
 
+def test_validate_prices_bool_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_prices("g4", [True, 100, 95])
+
 
 # --- validate_ratings ---
 def test_validate_ratings_valid():
@@ -41,12 +45,44 @@ def test_validate_ratings_wrong_type():
     with pytest.raises(TypeError):
         validate_ratings("g4", [4.2, "one", 4.1])
 
+def test_validate_ratings_bool_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_ratings("g4", [True, 4.0, 4.1])
+
 def test_validate_ratings_above_max():
     with pytest.raises(ValueError):
         validate_ratings("g4", [4.2, 5.1, 4.1])
 
 def test_validate_ratings_exactly_five_valid():
     assert validate_ratings("g4", [4.2, 5.0, 4.1]) == [4.2, 5.0, 4.1]
+
+
+# --- validate_our_rating ---
+def test_validate_our_rating_valid():
+    assert validate_our_rating("g4", 4.0) == 4.0
+
+def test_validate_our_rating_exactly_five_valid():
+    assert validate_our_rating("g4", 5.0) == 5.0
+
+def test_validate_our_rating_zero_raises():
+    with pytest.raises(ValueError):
+        validate_our_rating("g4", 0)
+
+def test_validate_our_rating_above_max_raises():
+    with pytest.raises(ValueError):
+        validate_our_rating("g4", 5.1)
+
+def test_validate_our_rating_none_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_our_rating("g4", None)
+
+def test_validate_our_rating_string_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_our_rating("g4", "4")
+
+def test_validate_our_rating_bool_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_our_rating("g4", True)
 
 
 # --- validate_observed_at ---
@@ -95,28 +131,32 @@ def test_check_continuity_across_month_boundary_with_timestamps():
 
 # --- validate_input ---
 def test_validate_input_success():
-    result = validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
+    result = validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 4.0, "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
     assert result.month == 9
 
 def test_validate_input_bad_prices_raises():
     with pytest.raises(ValueError):
-        validate_input("bed4", [105, 120], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
+        validate_input("bed4", [105, 120], [4.2, 4.0, 4.1], 4.0, "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
 
 def test_validate_input_bad_continuity_raises():
     with pytest.raises(ValueError):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-11-2026 10:00", "01-08-2026", [100, 110, 95])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 4.0, "01-11-2026 10:00", "01-08-2026", [100, 110, 95])
 
 def test_validate_input_prev_prices_contains_zero():
     with pytest.raises(ValueError, match="must be greater than 0"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 0, 95])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 4.0, "01-09-2026 10:00", "01-08-2026", [100, 0, 95])
 
 def test_validate_input_prev_prices_wrong_count():
     with pytest.raises(ValueError, match="must have 3 values"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "01-08-2026", [100, 110])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 4.0, "01-09-2026 10:00", "01-08-2026", [100, 110])
 
 def test_validate_input_bad_last_observed_format():
     with pytest.raises(ValueError, match="Invalid last_observed_mon_yr"):
-        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], "01-09-2026 10:00", "not-a-date", [100, 110, 95])
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 4.0, "01-09-2026 10:00", "not-a-date", [100, 110, 95])
+
+def test_validate_input_bad_our_rating_raises():
+    with pytest.raises(ValueError, match="Invalid our_rating"):
+        validate_input("bed4", [105, 120, 90], [4.2, 4.0, 4.1], 7.5, "01-09-2026 10:00", "01-08-2026", [100, 110, 95])
 
 
 # --- observation_fingerprint ---

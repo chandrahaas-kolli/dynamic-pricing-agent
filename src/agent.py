@@ -286,7 +286,7 @@ def validate_input_node(state: PipelineState) -> Dict:
     observed_at is left untouched.
     """
     parsed = validate_input(
-        state["product_id"], state["comp_prices"], state["comp_ratings"],
+        state["product_id"], state["comp_prices"], state["comp_ratings"], state["our_rating"],
         state["observed_at"], state["last_observed_mon_yr"], state["prev_comp_prices"]
     )
     return {"observed_date": parsed}
