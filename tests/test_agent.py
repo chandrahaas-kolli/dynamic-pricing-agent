@@ -13,6 +13,7 @@ from src.agent import (
     _cap_brief, _market_brief, get_connection,
 )
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
+from src.pricing import observation_fingerprint
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
 
 
@@ -502,6 +503,7 @@ def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch
 base = {
     "product_id": "g4",
     "comp_ratings": [3.9, 4, 4],
+    "our_rating": 4.0,
     "observed_at": "01-09-2018 10:00",
     "last_observed_mon_yr": "01-08-2018",
     "cleared_comp": None,
@@ -1014,6 +1016,26 @@ def test_app_invoke_persists_priced_decision_and_monthly_state(_mock_staging_db)
     ).fetchone()
     assert state == (37.0, result["price"])
 
+def test_app_invoke_persists_input_hash_matches_fingerprint(_mock_staging_db):
+    conn = _mock_staging_db
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 37}
+    app.invoke(proceed)
+    input_hash, inputs_json = conn.execute("SELECT input_hash, inputs FROM decisions").fetchone()
+    expected = observation_fingerprint(proceed["comp_prices"], proceed["comp_ratings"], proceed["our_rating"])
+    assert input_hash == expected
+    assert json.loads(inputs_json) == {
+        "comp_prices": proceed["comp_prices"],
+        "comp_ratings": proceed["comp_ratings"],
+        "our_rating": proceed["our_rating"],
+    }
+
 def test_app_invoke_persists_cap_exceeded_escalation(_mock_staging_db):
     conn = _mock_staging_db
     proceed = {**base, "comp_prices": [80, 40, 35],
@@ -1024,12 +1046,16 @@ def test_app_invoke_persists_cap_exceeded_escalation(_mock_staging_db):
                "min_price": 1,
                "max_price": 1000,
                "anchor": 30}
-    app.invoke(proceed)
+    result = app.invoke(proceed)
     outcome, price, brief_json = conn.execute("SELECT outcome, price, brief FROM decisions").fetchone()
     assert outcome == "escalated"
     assert price is None
     assert json.loads(brief_json) == {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
     assert staging.has_open_escalation(conn, "g4") is True
+    detail_json = conn.execute(
+        "SELECT detail FROM escalations WHERE product_id = ?", ("g4",)
+    ).fetchone()[0]
+    assert json.loads(detail_json) == result["detail_pack"]
 
 def test_app_invoke_persists_no_change_decision(_mock_staging_db):
     conn = _mock_staging_db

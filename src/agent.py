@@ -52,6 +52,7 @@ from src.pricing import (
     apply_dominance_clamp,
     enforce_bounds,
     months_to_reach,
+    observation_fingerprint,
 )
 
 
@@ -643,8 +644,10 @@ def persist_node(state: PipelineState) -> Dict:
     to state's anchor; current_price updates to the new price only when
     outcome is 'priced', otherwise it's left at current_price (no move).
 
-    When outcome is 'escalated', also opens a new escalation row for the
-    human to resolve later (step 12).
+    input_hash and inputs (comp_prices, comp_ratings, our_rating) are stored
+    on every decision. When outcome is 'escalated', also opens a new
+    escalation row for the human to resolve later (step 12), with
+    detail_pack stored on it as detail.
     """
     conn = get_connection()
 
@@ -657,10 +660,16 @@ def persist_node(state: PipelineState) -> Dict:
     else:
         outcome = "priced"
 
+    inputs = {
+        "comp_prices": state["comp_prices"],
+        "comp_ratings": state["comp_ratings"],
+        "our_rating": state["our_rating"],
+    }
+    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
     staging.record_decision(
         conn, state["product_id"], state["observed_at"], outcome,
         state.get("price"), state.get("escalation_cause"), state.get("tier"),
-        state["reason"], state.get("brief"),
+        state["reason"], state.get("brief"), input_hash, inputs,
     )
 
     if "anchor" in state and "current_price" in state:
@@ -669,7 +678,7 @@ def persist_node(state: PipelineState) -> Dict:
         staging.upsert_monthly_state(conn, state["product_id"], month, state["anchor"], current_price)
 
     if outcome == "escalated":
-        staging.open_escalation(conn, state["product_id"], state["escalation_cause"])
+        staging.open_escalation(conn, state["product_id"], state["escalation_cause"], state.get("detail_pack"))
 
     return {}
 

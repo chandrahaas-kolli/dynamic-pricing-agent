@@ -14,6 +14,7 @@ class PipelineState(TypedDict):
     product_id: str
     comp_prices: List[float]
     comp_ratings: List[float]
+    our_rating: float
     observed_at: str
     last_observed_mon_yr: str
     prev_comp_prices: List[float]
@@ -23,7 +24,6 @@ class PipelineState(TypedDict):
     observed_date: NotRequired[datetime]
     comp_details: NotRequired[List[CompEntry]]
     anchor: NotRequired[float]
-    our_rating: NotRequired[float]
     tier: NotRequired[str]
     escalate: NotRequired[bool]
     action: NotRequired[str]

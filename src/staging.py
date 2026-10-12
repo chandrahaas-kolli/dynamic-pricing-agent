@@ -20,6 +20,8 @@ CREATE_DECISIONS = """
         tier              TEXT,
         reason            TEXT    NOT NULL,
         brief             TEXT,
+        input_hash        TEXT    NOT NULL,
+        inputs            TEXT    NOT NULL,
         created_at        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (product_id, observed_at)
     )
@@ -40,6 +42,7 @@ CREATE_ESCALATIONS = """
         id          INTEGER PRIMARY KEY,
         product_id  TEXT NOT NULL,
         cause       TEXT NOT NULL,
+        detail      TEXT,
         status      TEXT NOT NULL DEFAULT 'open',
         created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
@@ -54,33 +57,43 @@ def init_db(conn):
         conn.execute(CREATE_ESCALATIONS)
 
 
-def record_decision(conn, product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief):
+def record_decision(
+    conn, product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, input_hash, inputs,
+):
     """Insert one row into decisions.
 
     brief is stored as its JSON text (json.dumps), or NULL when brief is None.
+    input_hash is the observation_fingerprint of this run's inputs, used by
+    the idempotency gate to detect a resend vs a genuine data conflict.
+    inputs is the dict those inputs were computed from (comp_prices,
+    comp_ratings, our_rating), stored as its JSON text, kept alongside the
+    hash so a conflict can be explained without recomputing anything.
     (product_id, observed_at) is unique: inserting a duplicate raises
     sqlite3.IntegrityError.
     """
     brief_json = json.dumps(brief) if brief is not None else None
+    inputs_json = json.dumps(inputs)
     with conn:
         conn.execute(
             """
             INSERT INTO decisions
-                (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, input_hash, inputs)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief_json),
+            (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief_json, input_hash, inputs_json),
         )
 
 
 def find_decision(conn, product_id, observed_at):
     """Return the decisions row for product_id/observed_at as a dict, or None if it doesn't exist.
 
-    brief is returned as its parsed dict (json.loads), or None when NULL.
+    brief and inputs are returned as their parsed dicts (json.loads); brief
+    is None when NULL.
     """
     cursor = conn.execute(
         """
-        SELECT id, product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, created_at
+        SELECT id, product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief,
+               input_hash, inputs, created_at
         FROM decisions
         WHERE product_id = ? AND observed_at = ?
         """,
@@ -92,6 +105,7 @@ def find_decision(conn, product_id, observed_at):
     columns = [description[0] for description in cursor.description]
     decision = dict(zip(columns, row))
     decision["brief"] = json.loads(decision["brief"]) if decision["brief"] is not None else None
+    decision["inputs"] = json.loads(decision["inputs"])
     return decision
 
 
@@ -131,12 +145,16 @@ def get_monthly_state(conn, product_id, month):
     return dict(zip(columns, row))
 
 
-def open_escalation(conn, product_id, cause):
-    """Insert a new open escalation for product_id/cause and return its id."""
+def open_escalation(conn, product_id, cause, detail=None):
+    """Insert a new open escalation for product_id/cause and return its id.
+
+    detail is stored as its JSON text (json.dumps), or NULL when detail is None.
+    """
+    detail_json = json.dumps(detail) if detail is not None else None
     with conn:
         cursor = conn.execute(
-            "INSERT INTO escalations (product_id, cause) VALUES (?, ?)",
-            (product_id, cause),
+            "INSERT INTO escalations (product_id, cause, detail) VALUES (?, ?, ?)",
+            (product_id, cause, detail_json),
         )
         return cursor.lastrowid
 

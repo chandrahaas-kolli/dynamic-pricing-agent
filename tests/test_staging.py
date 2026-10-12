@@ -17,6 +17,9 @@ def conn():
     connection.close()
 
 
+SAMPLE_INPUTS = {"comp_prices": [80, 40, 35], "comp_ratings": [4.5, 4.0, 3.8], "our_rating": 4.0}
+
+
 def test_init_db_twice_raises_nothing(conn):
     init_db(conn)
 
@@ -25,13 +28,14 @@ def test_record_decision_round_trip(conn):
     brief = {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
     record_decision(
         conn, "g4", "01-09-2018 10:00", "escalated", None,
-        "cap_exceeded", "medium", "Escalated (medium): target beyond the cap.", brief,
+        "cap_exceeded", "medium", "Escalated (medium): target beyond the cap.", brief, "a" * 64, SAMPLE_INPUTS,
     )
     row = conn.execute(
-        "SELECT product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, created_at "
-        "FROM decisions"
+        "SELECT product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, "
+        "input_hash, inputs, created_at FROM decisions"
     ).fetchone()
-    product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief_json, created_at = row
+    (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief_json,
+     input_hash, inputs_json, created_at) = row
     assert product_id == "g4"
     assert outcome == "escalated"
     assert price is None
@@ -39,13 +43,16 @@ def test_record_decision_round_trip(conn):
     assert tier == "medium"
     assert reason == "Escalated (medium): target beyond the cap."
     assert json.loads(brief_json) == brief
+    assert input_hash == "a" * 64
+    assert json.loads(inputs_json) == SAMPLE_INPUTS
     assert created_at is not None
 
 
 def test_record_decision_no_brief_stores_null_and_keeps_price(conn):
     record_decision(
         conn, "g4", "01-09-2018 10:00", "priced", 42.5,
-        None, "low", "Priced at 42.50: target is the mid of the competitor band (42.50).", None,
+        None, "low", "Priced at 42.50: target is the mid of the competitor band (42.50).", None, "a" * 64,
+        SAMPLE_INPUTS,
     )
     row = conn.execute("SELECT price, brief FROM decisions").fetchone()
     price, brief_json = row
@@ -54,21 +61,34 @@ def test_record_decision_no_brief_stores_null_and_keeps_price(conn):
 
 
 def test_record_decision_duplicate_product_and_observed_at_raises(conn):
-    record_decision(conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None)
+    record_decision(
+        conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None, "a" * 64, SAMPLE_INPUTS,
+    )
     with pytest.raises(sqlite3.IntegrityError):
-        record_decision(conn, "g4", "01-09-2018 10:00", "priced", 43.0, None, "low", "Priced at 43.00.", None)
+        record_decision(
+            conn, "g4", "01-09-2018 10:00", "priced", 43.0, None, "low", "Priced at 43.00.", None, "a" * 64,
+            SAMPLE_INPUTS,
+        )
 
 
 def test_record_decision_same_product_different_observed_at_inserts_fine(conn):
-    record_decision(conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None)
-    record_decision(conn, "g4", "02-09-2018 10:00", "priced", 43.0, None, "low", "Priced at 43.00.", None)
+    record_decision(
+        conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None, "a" * 64, SAMPLE_INPUTS,
+    )
+    record_decision(
+        conn, "g4", "02-09-2018 10:00", "priced", 43.0, None, "low", "Priced at 43.00.", None, "a" * 64, SAMPLE_INPUTS,
+    )
     count = conn.execute("SELECT COUNT(*) FROM decisions WHERE product_id = ?", ("g4",)).fetchone()[0]
     assert count == 2
 
 
 def test_record_decision_same_date_different_time_inserts_fine(conn):
-    record_decision(conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None)
-    record_decision(conn, "g4", "01-09-2018 14:30", "priced", 43.0, None, "low", "Priced at 43.00.", None)
+    record_decision(
+        conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None, "a" * 64, SAMPLE_INPUTS,
+    )
+    record_decision(
+        conn, "g4", "01-09-2018 14:30", "priced", 43.0, None, "low", "Priced at 43.00.", None, "a" * 64, SAMPLE_INPUTS,
+    )
     count = conn.execute("SELECT COUNT(*) FROM decisions WHERE product_id = ?", ("g4",)).fetchone()[0]
     assert count == 2
 
@@ -77,12 +97,14 @@ def test_find_decision_round_trip(conn):
     brief = {"recommendation": "multi_month_path", "rationale": "Gradual is safer."}
     record_decision(
         conn, "g4", "01-09-2018 10:00", "escalated", None,
-        "cap_exceeded", "medium", "Escalated (medium): target beyond the cap.", brief,
+        "cap_exceeded", "medium", "Escalated (medium): target beyond the cap.", brief, "a" * 64, SAMPLE_INPUTS,
     )
     decision = find_decision(conn, "g4", "01-09-2018 10:00")
     assert decision["product_id"] == "g4"
     assert decision["outcome"] == "escalated"
     assert decision["brief"] == brief
+    assert decision["input_hash"] == "a" * 64
+    assert decision["inputs"] == SAMPLE_INPUTS
 
 
 def test_find_decision_missing_returns_none(conn):
@@ -90,7 +112,9 @@ def test_find_decision_missing_returns_none(conn):
 
 
 def test_find_decision_no_brief_returns_none(conn):
-    record_decision(conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None)
+    record_decision(
+        conn, "g4", "01-09-2018 10:00", "priced", 42.5, None, "low", "Priced at 42.50.", None, "a" * 64, SAMPLE_INPUTS,
+    )
     decision = find_decision(conn, "g4", "01-09-2018 10:00")
     assert decision["brief"] is None
 
@@ -121,3 +145,16 @@ def test_has_open_escalation_true_after_open_false_after_resolve(conn):
 def test_has_open_escalation_does_not_count_another_product(conn):
     open_escalation(conn, "g4", "cap_exceeded")
     assert has_open_escalation(conn, "other") is False
+
+
+def test_open_escalation_detail_round_trips_as_json(conn):
+    detail = {"triggered_count": 2, "total_count": 3}
+    escalation_id = open_escalation(conn, "g4", "competitor_move", detail)
+    detail_json = conn.execute("SELECT detail FROM escalations WHERE id = ?", (escalation_id,)).fetchone()[0]
+    assert json.loads(detail_json) == detail
+
+
+def test_open_escalation_no_detail_stores_null(conn):
+    escalation_id = open_escalation(conn, "g4", "cap_exceeded")
+    detail = conn.execute("SELECT detail FROM escalations WHERE id = ?", (escalation_id,)).fetchone()[0]
+    assert detail is None
