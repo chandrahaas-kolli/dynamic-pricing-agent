@@ -10,7 +10,7 @@ from src.agent import (
     app, escalate_node, competitor_move_check_node, check_move_size_node,
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
     build_competitors_text, describe_target, build_market_move_text,
-    _cap_brief, _market_brief, get_connection,
+    _cap_brief, _market_brief, get_connection, gate_node, route_gate,
 )
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.pricing import observation_fingerprint
@@ -98,6 +98,100 @@ def test_get_connection_lazy_then_creates_all_tables(tmp_path, monkeypatch):
     finally:
         conn.close()
         get_connection.cache_clear()
+
+
+# --- gate_node ---
+def _gate_state(**overrides):
+    state = {
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "01-09-2018 10:00",
+    }
+    state.update(overrides)
+    return state
+
+def test_gate_node_empty_db_proceeds(_mock_staging_db):
+    result = gate_node(_gate_state())
+    assert result == {"gate": "proceed"}
+
+def test_gate_node_same_key_same_inputs_duplicate(_mock_staging_db):
+    conn = _mock_staging_db
+    state = _gate_state()
+    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+    inputs = {
+        "comp_prices": state["comp_prices"], "comp_ratings": state["comp_ratings"], "our_rating": state["our_rating"],
+    }
+    staging.record_decision(
+        conn, state["product_id"], state["observed_at"], "priced", 42.5,
+        None, "low", "Priced at 42.50.", None, input_hash, inputs,
+    )
+    result = gate_node(state)
+    assert result["gate"] == "duplicate"
+    assert result["stored_decision"]["product_id"] == "g4"
+    assert result["stored_decision"]["outcome"] == "priced"
+
+def test_gate_node_same_key_different_comp_prices_conflict(_mock_staging_db):
+    conn = _mock_staging_db
+    state = _gate_state()
+    stored_comp_prices = [80, 41, 35]
+    stored_inputs = {
+        "comp_prices": stored_comp_prices, "comp_ratings": state["comp_ratings"], "our_rating": state["our_rating"],
+    }
+    stored_input_hash = observation_fingerprint(stored_comp_prices, state["comp_ratings"], state["our_rating"])
+    staging.record_decision(
+        conn, state["product_id"], state["observed_at"], "priced", 42.5,
+        None, "low", "Priced at 42.50.", None, stored_input_hash, stored_inputs,
+    )
+    result = gate_node(state)
+    assert result["gate"] == "conflict"
+    assert result["escalation_cause"] == "data_conflict"
+    assert result["tier"] == "medium"
+    assert result["conflict"]["stored"] == stored_inputs
+    assert result["conflict"]["incoming"] == {
+        "comp_prices": state["comp_prices"], "comp_ratings": state["comp_ratings"], "our_rating": state["our_rating"],
+    }
+    assert result["conflict"]["stored_outcome"] == "priced"
+
+def test_gate_node_new_key_open_escalation_held(_mock_staging_db):
+    conn = _mock_staging_db
+    staging.open_escalation(conn, "g4", "cap_exceeded")
+    result = gate_node(_gate_state())
+    assert result == {"gate": "held"}
+
+def test_gate_node_same_key_same_inputs_and_open_escalation_still_duplicate(_mock_staging_db):
+    conn = _mock_staging_db
+    state = _gate_state()
+    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+    inputs = {
+        "comp_prices": state["comp_prices"], "comp_ratings": state["comp_ratings"], "our_rating": state["our_rating"],
+    }
+    staging.record_decision(
+        conn, state["product_id"], state["observed_at"], "priced", 42.5,
+        None, "low", "Priced at 42.50.", None, input_hash, inputs,
+    )
+    staging.open_escalation(conn, "g4", "cap_exceeded")
+    result = gate_node(state)
+    assert result["gate"] == "duplicate"
+
+
+# --- route_gate ---
+def test_route_gate_duplicate():
+    assert route_gate({"gate": "duplicate"}) == "duplicate"
+
+def test_route_gate_conflict():
+    assert route_gate({"gate": "conflict"}) == "conflict"
+
+def test_route_gate_held():
+    assert route_gate({"gate": "held"}) == "held"
+
+def test_route_gate_proceed():
+    assert route_gate({"gate": "proceed"}) == "proceed"
+
+def test_route_gate_unknown_raises():
+    with pytest.raises(ValueError):
+        route_gate({"gate": "something_else"})
 
 
 # --- escalate_node ---
@@ -207,6 +301,20 @@ def test_escalate_node_llm_failed_no_brief_keys():
         "llm_attempts": 3,
     }
     result = escalate_node(state)
+    assert result["needs_brief"] is False
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+    assert "brief_attempts" not in result
+
+def test_escalate_node_data_conflict_no_brief():
+    conflict = {
+        "stored": {"comp_prices": [80, 40, 35], "comp_ratings": [4.5, 4.0, 3.8], "our_rating": 4.0},
+        "incoming": {"comp_prices": [80, 41, 35], "comp_ratings": [4.5, 4.0, 3.8], "our_rating": 4.0},
+        "stored_outcome": "priced",
+    }
+    state = {"escalation_cause": "data_conflict", "conflict": conflict}
+    result = escalate_node(state)
+    assert result["detail_pack"] == conflict
     assert result["needs_brief"] is False
     assert result["brief"] is None
     assert "brief_errors" not in result
@@ -626,6 +734,23 @@ def test_apply_dominance_clamp_node_no_move():
     assert result["price"] == 100
     assert result["dominance_clamped"] is False
     assert result["dominance_side"] is None
+
+def test_reason_node_held_exact_text():
+    result = reason_node({"gate": "held"})
+    assert result["reason"] == "Held: an open escalation is awaiting human review; price unchanged."
+
+def test_reason_node_data_conflict_includes_stored_outcome():
+    state = {
+        "escalation_cause": "data_conflict",
+        "conflict": {
+            "stored": {"comp_prices": [80, 40, 35], "comp_ratings": [4.5, 4.0, 3.8], "our_rating": 4.0},
+            "incoming": {"comp_prices": [80, 41, 35], "comp_ratings": [4.5, 4.0, 3.8], "our_rating": 4.0},
+            "stored_outcome": "priced",
+        },
+    }
+    result = reason_node(state)
+    assert "stored outcome: priced" in result["reason"]
+    assert "Escalated (medium)" in result["reason"]
 
 def test_reason_node_competitor_move_two_triggered():
     state = {
@@ -1089,7 +1214,7 @@ def test_app_invoke_escalated_run_opens_escalation_priced_run_does_not(_mock_sta
     app.invoke(cap_exceeded_proceed)
     assert staging.has_open_escalation(conn, "g4") is True
 
-def test_app_invoke_escalate_then_no_change_keeps_escalation_open(_mock_staging_db):
+def test_app_invoke_escalate_then_new_observation_held(_mock_staging_db):
     conn = _mock_staging_db
     escalate_proceed = {**base, "comp_prices": [80, 40, 35],
                          "prev_comp_prices": [74, 39.24, 39.24],
@@ -1103,17 +1228,20 @@ def test_app_invoke_escalate_then_no_change_keeps_escalation_open(_mock_staging_
 
     # A later observed_at: a distinct observation of the same product, not a
     # re-run of the same one (which the decisions UNIQUE constraint rejects).
-    no_change_proceed = {**base, "observed_at": "05-09-2018 10:00",
-                          "comp_prices": [80, 40, 35],
-                          "prev_comp_prices": [74, 39.24, 39.24],
-                          "comp_ratings": [4.5, 4.0, 3.8],
-                          "our_rating": 4.0,
-                          "current_price": 40,
-                          "min_price": 1,
-                          "max_price": 1000,
-                          "anchor": 38}
-    result = app.invoke(no_change_proceed)
-    assert round(result["price"], 2) == round(result["current_price"], 2)
+    # With an open escalation already on this product, gate_node holds it
+    # instead of letting it through to the normal pricing flow.
+    held_proceed = {**base, "observed_at": "05-09-2018 10:00",
+                     "comp_prices": [80, 40, 35],
+                     "prev_comp_prices": [74, 39.24, 39.24],
+                     "comp_ratings": [4.5, 4.0, 3.8],
+                     "our_rating": 4.0,
+                     "current_price": 40,
+                     "min_price": 1,
+                     "max_price": 1000,
+                     "anchor": 38}
+    result = app.invoke(held_proceed)
+    assert result["gate"] == "held"
+    assert result["reason"].startswith("Held")
 
     anchor_price = conn.execute(
         "SELECT anchor_price FROM monthly_state WHERE product_id = ? AND month = ?",
@@ -1122,3 +1250,90 @@ def test_app_invoke_escalate_then_no_change_keeps_escalation_open(_mock_staging_
     assert anchor_price == 30.0
     # Nothing in persist_node resolves escalations; only a human does (step 12).
     assert staging.has_open_escalation(conn, "g4") is True
+
+
+# --- gate wiring, graph-level via app.invoke ---
+def test_app_invoke_duplicate_resend_returns_stored_decision(_mock_staging_db):
+    conn = _mock_staging_db
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 37}
+    app.invoke(proceed)
+    result = app.invoke(proceed)
+    assert result["gate"] == "duplicate"
+    assert result["stored_decision"]["product_id"] == "g4"
+    count = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+    assert count == 1
+
+def test_app_invoke_conflict_same_key_different_comp_prices(_mock_staging_db):
+    conn = _mock_staging_db
+    proceed = {**base, "comp_prices": [80, 40, 35],
+               "prev_comp_prices": [74, 39.24, 39.24],
+               "comp_ratings": [4.5, 4.0, 3.8],
+               "our_rating": 4.0,
+               "current_price": 39,
+               "min_price": 1,
+               "max_price": 1000,
+               "anchor": 37}
+    app.invoke(proceed)
+
+    conflicting_proceed = {**proceed, "comp_prices": [80, 41, 35]}
+    result = app.invoke(conflicting_proceed)
+    assert result["escalation_cause"] == "data_conflict"
+    count = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+    assert count == 1
+
+    status, cause, detail_json = conn.execute(
+        "SELECT status, cause, detail FROM escalations WHERE product_id = ?", ("g4",)
+    ).fetchone()
+    assert status == "open"
+    assert cause == "data_conflict"
+    detail = json.loads(detail_json)
+    assert "stored" in detail
+    assert "incoming" in detail
+
+def test_app_invoke_held_run_records_held_decision_and_skips_llm(_mock_staging_db, monkeypatch):
+    conn = _mock_staging_db
+    fake = _FakeStepLLM(_step_decision_result())
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+
+    cap_exceeded_proceed = {**base, "comp_prices": [80, 40, 35],
+                             "prev_comp_prices": [74, 39.24, 39.24],
+                             "comp_ratings": [4.5, 4.0, 3.8],
+                             "our_rating": 4.0,
+                             "current_price": 39,
+                             "min_price": 1,
+                             "max_price": 1000,
+                             "anchor": 30}
+    app.invoke(cap_exceeded_proceed)
+
+    held_proceed = {**base, "observed_at": "05-09-2018 10:00",
+                     "comp_prices": [80, 40, 35],
+                     "prev_comp_prices": [74, 39.24, 39.24],
+                     "comp_ratings": [4.5, 4.0, 3.8],
+                     "our_rating": 4.0,
+                     "current_price": 40,
+                     "min_price": 1,
+                     "max_price": 1000,
+                     "anchor": 38}
+    result = app.invoke(held_proceed)
+    assert result["reason"].startswith("Held")
+    assert "band" not in result
+    assert "target_price" not in result
+
+    outcome, price = conn.execute(
+        "SELECT outcome, price FROM decisions WHERE observed_at = ?", ("05-09-2018 10:00",)
+    ).fetchone()
+    assert outcome == "held"
+    assert price is None
+    assert fake.call_count == 0
+
+    current_price = conn.execute(
+        "SELECT current_price FROM monthly_state WHERE product_id = ? AND month = ?", ("g4", "2018-09"),
+    ).fetchone()[0]
+    assert current_price == 39.0

@@ -5,19 +5,23 @@ pricing.py holds the pure calculation functions; this file wraps them as
 graph nodes and wires them together in execution order.
 
 Flow:
-    START -> validate_input -> competitor_move_check -> route on action:
-        trigger -> escalate_node (escalation_cause=competitor_move) -> reason -> persist -> END
-        none    -> no_action_node -> reason -> persist -> END
-        proceed -> pair_competitors -> analyze_position -> resolve_target_price
-                   -> check_move_size -> route on path
-                      (llm is overridden to direct for tie targets):
-                       escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> persist -> END
-                       llm      -> llm_step_size -> route on outcome:
-                                       escalate (escalation_cause=llm_failed)
-                                           -> escalate_node -> reason -> persist -> END
-                                       compute_step -> compute_step
-                                           -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
-                       direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
+    START -> validate_input -> gate -> route on gate:
+        duplicate -> END (a resend; the stored decision is the answer, nothing new to persist)
+        conflict  -> escalate_node (escalation_cause=data_conflict) -> reason -> persist -> END
+        held      -> reason -> persist -> END (product has an open escalation; skips pricing entirely)
+        proceed   -> competitor_move_check -> route on action:
+            trigger -> escalate_node (escalation_cause=competitor_move) -> reason -> persist -> END
+            none    -> no_action_node -> reason -> persist -> END
+            proceed -> pair_competitors -> analyze_position -> resolve_target_price
+                       -> check_move_size -> route on path
+                          (llm is overridden to direct for tie targets):
+                           escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> persist -> END
+                           llm      -> llm_step_size -> route on outcome:
+                                           escalate (escalation_cause=llm_failed)
+                                               -> escalate_node -> reason -> persist -> END
+                                           compute_step -> compute_step
+                                               -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
+                           direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
 """
 
 import sqlite3
@@ -288,6 +292,48 @@ def validate_input_node(state: PipelineState) -> Dict:
     return {"observed_date": parsed}
 
 
+def gate_node(state: PipelineState) -> Dict:
+    """Idempotency and hold gate: decide whether this observation runs at all.
+
+    Checks, in this order:
+    1. Key (product_id, observed_at) already in decisions with the same
+       input_hash -> "duplicate": a resend; return the stored decision.
+    2. Key present with a different input_hash -> "conflict": the same
+       moment reported with different data; escalate as data_conflict with
+       both versions. Neither version is assumed wrong.
+    3. No stored row but the product has an open escalation -> "held".
+    4. Otherwise -> "proceed" to the normal pricing flow.
+
+    The key lookup comes first so a resend always gets its stored answer,
+    even if the product has since been held.
+    """
+    conn = get_connection()
+    new_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+    stored = staging.find_decision(conn, state["product_id"], state["observed_at"])
+    if stored is not None:
+        if stored["input_hash"] == new_hash:
+            return {"gate": "duplicate", "stored_decision": stored}
+        incoming = {
+            "comp_prices": state["comp_prices"],
+            "comp_ratings": state["comp_ratings"],
+            "our_rating": state["our_rating"],
+        }
+        return {
+            "gate": "conflict",
+            "escalate": True,
+            "tier": "medium",
+            "escalation_cause": "data_conflict",
+            "conflict": {
+                "stored": stored["inputs"],
+                "incoming": incoming,
+                "stored_outcome": stored["outcome"],
+            },
+        }
+    if staging.has_open_escalation(conn, state["product_id"]):
+        return {"gate": "held"}
+    return {"gate": "proceed"}
+
+
 def competitor_move_check_node(state: PipelineState) -> Dict:
     """Compare new vs previous competitor prices.
 
@@ -478,13 +524,14 @@ def enforce_bounds_node(state: PipelineState) -> Dict:
 
 
 def escalate_node(state: PipelineState) -> Dict:
-    """Merged escalation for competitor_move, cap_exceeded and llm_failed.
+    """Merged escalation for competitor_move, cap_exceeded, llm_failed and data_conflict.
 
     Decides the detail_pack and whether a brief is needed by
     escalation_cause: competitor_move further by len(triggered) (2+
     simultaneous triggers -> needs_brief); cap_exceeded always needs a
-    brief; llm_failed never does (the retry loop already exhausted
-    automated options, so this just surfaces the failure).
+    brief; llm_failed and data_conflict never do (llm_failed already
+    exhausted automated options; data_conflict is for a human to pick a
+    version, not to be summarized).
 
     When needs_brief, calls the matching brief (_cap_brief for cap_exceeded,
     _market_brief for competitor_move) and adds brief_errors/brief_attempts
@@ -518,6 +565,9 @@ def escalate_node(state: PipelineState) -> Dict:
             "llm_attempts": state["llm_attempts"],
         }
         needs_brief = False
+    elif cause == "data_conflict":
+        detail_pack = state["conflict"]
+        needs_brief = False
     else:
         raise ValueError(f"unexpected escalation_cause: {cause}")
 
@@ -541,19 +591,23 @@ def no_action_node(state: PipelineState) -> Dict:
 def reason_node(state: PipelineState) -> Dict:
     """Compose a deterministic, LLM-free explanation of the outcome.
 
-    Runs on every path (escalated, no-change, and priced) as the graph's
-    last node. Checked in order: escalation_cause (competitor_move,
-    cap_exceeded or llm_failed escalation text, or ValueError on any other
-    cause that is present), then action == 'none' (below the deadband),
-    then the priced case (direct/llm paths) — which explains target_source
-    and appends clauses for any partial step or clamp that fired. Invalid
-    input never reaches here, since validate_input raises before any node
-    runs.
+    Runs on every path (held, escalated, no-change, and priced) as the
+    graph's last node. Checked in order: gate == 'held' (product has an
+    open escalation; pricing was skipped entirely), then escalation_cause
+    (competitor_move, cap_exceeded, llm_failed or data_conflict escalation
+    text, or ValueError on any other cause that is present), then
+    action == 'none' (below the deadband), then the priced case
+    (direct/llm paths) — which explains target_source and appends clauses
+    for any partial step or clamp that fired. Invalid input never reaches
+    here, since validate_input raises before any node runs.
 
     On competitor_move and cap_exceeded, appends " Brief unavailable." when
     a brief was needed but the LLM call failed (needs_brief True, brief
     None), so the human reviewer knows no automated brief is waiting.
     """
+    if state.get("gate") == "held":
+        return {"reason": "Held: an open escalation is awaiting human review; price unchanged."}
+
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
         triggered = state["triggered"]
@@ -574,6 +628,13 @@ def reason_node(state: PipelineState) -> Dict:
         attempt_word = "attempt" if llm_attempts == 1 else "attempts"
         codes = ", ".join(error.split(":", 1)[0] for error in state["llm_errors"])
         text = f"Escalated (medium): step-size model failed after {llm_attempts} {attempt_word} ({codes})."
+        return {"reason": text}
+    elif cause == "data_conflict":
+        stored_outcome = state["conflict"]["stored_outcome"]
+        text = (
+            f"Escalated (medium): conflicting data for the same observation "
+            f"(stored outcome: {stored_outcome}); a human must choose the correct version."
+        )
         return {"reason": text}
     elif cause is not None:
         raise ValueError(f"unexpected escalation_cause: {cause}")
@@ -635,9 +696,19 @@ def reason_node(state: PipelineState) -> Dict:
 def persist_node(state: PipelineState) -> Dict:
     """Write this run's decision, and its monthly state if priced, to the staging DB.
 
-    outcome is 'escalated' when escalation_cause is set, 'no_change' when
-    action is 'none' or the priced price didn't move the current price,
-    otherwise 'priced'. Runs on every path as the graph's last node.
+    Checked before the usual outcome logic:
+    - gate == 'conflict': the (product_id, observed_at) key is already
+      taken, so no new decision row is written; only opens a new
+      data_conflict escalation (detail_pack is the conflict dict).
+    - gate == 'held': records a 'held' decision (price/escalation_cause/
+      tier/brief all None) so the resend-detection key exists for this
+      observation, but writes no monthly_state and opens no escalation
+      (the existing one already covers it).
+
+    Otherwise, outcome is 'escalated' when escalation_cause is set,
+    'no_change' when action is 'none' or the priced price didn't move the
+    current price, otherwise 'priced'. Runs on every path as the graph's
+    last node.
 
     monthly_state is only written when both anchor and current_price are in
     state (the paths that reached check_move_size): anchor_price is frozen
@@ -650,6 +721,23 @@ def persist_node(state: PipelineState) -> Dict:
     detail_pack stored on it as detail.
     """
     conn = get_connection()
+    inputs = {
+        "comp_prices": state["comp_prices"],
+        "comp_ratings": state["comp_ratings"],
+        "our_rating": state["our_rating"],
+    }
+    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+
+    if state.get("gate") == "conflict":
+        staging.open_escalation(conn, state["product_id"], "data_conflict", state["detail_pack"])
+        return {}
+
+    if state.get("gate") == "held":
+        staging.record_decision(
+            conn, state["product_id"], state["observed_at"], "held",
+            None, None, None, state["reason"], None, input_hash, inputs,
+        )
+        return {}
 
     if state.get("escalation_cause"):
         outcome = "escalated"
@@ -660,12 +748,6 @@ def persist_node(state: PipelineState) -> Dict:
     else:
         outcome = "priced"
 
-    inputs = {
-        "comp_prices": state["comp_prices"],
-        "comp_ratings": state["comp_ratings"],
-        "our_rating": state["our_rating"],
-    }
-    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
     staging.record_decision(
         conn, state["product_id"], state["observed_at"], outcome,
         state.get("price"), state.get("escalation_cause"), state.get("tier"),
@@ -684,6 +766,14 @@ def persist_node(state: PipelineState) -> Dict:
 
 
 # ---------- Routing ----------
+
+def route_gate(state: PipelineState) -> str:
+    """Return the branch label for the gate set by gate_node."""
+    for route in ("duplicate", "conflict", "held", "proceed"):
+        if state["gate"] == route:
+            return route
+    raise ValueError(f"unexpected gate: {state['gate']}")
+
 
 def route_comp_move_check(state: PipelineState) -> str:
     """Return the branch label for the action set by the move check."""
@@ -715,6 +805,7 @@ def route_llm_step_size(state: PipelineState) -> str:
 graph = StateGraph(PipelineState)
 
 graph.add_node("validate_input_node", validate_input_node)
+graph.add_node("gate_node", gate_node)
 graph.add_node("competitor_move_check_node", competitor_move_check_node)
 graph.add_node("pair_competitors_node", pair_competitors_node)
 graph.add_node("analyze_position_node", analyze_position_node)
@@ -730,7 +821,21 @@ graph.add_node("reason_node", reason_node)
 graph.add_node("persist_node", persist_node)
 
 graph.add_edge(START, "validate_input_node")
-graph.add_edge("validate_input_node", "competitor_move_check_node")
+graph.add_edge("validate_input_node", "gate_node")
+
+# Idempotency/hold gate: a resend ends immediately, a conflict escalates,
+# a held product's new observation skips straight to reason, and only a
+# genuinely new observation proceeds to the normal pricing flow.
+graph.add_conditional_edges(
+    "gate_node",
+    route_gate,
+    {
+        "duplicate": END,
+        "conflict": "escalate_node",
+        "held": "reason_node",
+        "proceed": "competitor_move_check_node",
+    },
+)
 
 # Move check runs before pairing: cheapest place to stop before computing anything.
 graph.add_conditional_edges(

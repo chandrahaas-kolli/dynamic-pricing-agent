@@ -56,3 +56,6 @@ class PipelineState(TypedDict):
     # errors and attempt count from the escalation-brief LLM call; kept out of detail_pack
     brief_errors: NotRequired[List[str]]
     brief_attempts: NotRequired[int]
+    gate: NotRequired[str]
+    stored_decision: NotRequired[Dict]
+    conflict: NotRequired[Dict]
