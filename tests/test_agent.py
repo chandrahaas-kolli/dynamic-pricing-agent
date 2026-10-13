@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+from datetime import datetime
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -11,6 +12,10 @@ from src.agent import (
     reason_node, apply_dominance_clamp_node, llm_step_size_node,
     build_competitors_text, describe_target, build_market_move_text,
     _cap_brief, _market_brief, get_connection, gate_node, route_gate,
+    validate_input_node, pair_competitors_node, analyze_position_node,
+    resolve_target_price_node, compute_step_node, enforce_bounds_node,
+    no_action_node, persist_node,
+    route_comp_move_check, route_check_move_size, route_llm_step_size,
 )
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.pricing import observation_fingerprint
@@ -1337,3 +1342,242 @@ def test_app_invoke_held_run_records_held_decision_and_skips_llm(_mock_staging_d
         "SELECT current_price FROM monthly_state WHERE product_id = ? AND month = ?", ("g4", "2018-09"),
     ).fetchone()[0]
     assert current_price == 39.0
+
+
+# --- validate_input_node ---
+def test_validate_input_node_valid_state():
+    state = {
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "01-09-2018 10:00",
+        "last_observed_mon_yr": "01-08-2018",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    result = validate_input_node(state)
+    assert result == {"observed_date": datetime(2018, 9, 1, 10, 0)}
+
+def test_validate_input_node_bad_our_rating_raises():
+    state = {
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 7.5,
+        "observed_at": "01-09-2018 10:00",
+        "last_observed_mon_yr": "01-08-2018",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    with pytest.raises(ValueError):
+        validate_input_node(state)
+
+
+# --- pair_competitors_node ---
+def test_pair_competitors_node():
+    state = {"product_id": "g4", "comp_prices": [80, 40, 35], "comp_ratings": [4.5, 4.0, 3.8]}
+    result = pair_competitors_node(state)
+    assert result == {
+        "comp_details": [
+            {"comp_price": 80, "comp_rating": 4.5},
+            {"comp_price": 40, "comp_rating": 4.0},
+            {"comp_price": 35, "comp_rating": 3.8},
+        ]
+    }
+
+
+# --- analyze_position_node ---
+def test_analyze_position_node_rated_above_average():
+    state = {"comp_prices": [80, 40, 35], "comp_ratings": [4.0, 4.0, 4.0], "our_rating": 4.5}
+    result = analyze_position_node(state)
+    assert result["band"] == {"low": 35, "high": 80, "mid": 57.5}
+    assert result["gap"] == pytest.approx(0.5)
+    assert result["target_label"] == "high"
+    assert set(result.keys()) == {"band", "gap", "target_label"}
+
+def test_analyze_position_node_rated_at_average():
+    state = {"comp_prices": [80, 40, 35], "comp_ratings": [4.0, 4.0, 4.0], "our_rating": 4.0}
+    result = analyze_position_node(state)
+    assert result["band"] == {"low": 35, "high": 80, "mid": 57.5}
+    assert result["gap"] == pytest.approx(0.0)
+    assert result["target_label"] == "mid"
+    assert set(result.keys()) == {"band", "gap", "target_label"}
+
+def test_analyze_position_node_rated_below_average():
+    state = {"comp_prices": [80, 40, 35], "comp_ratings": [4.0, 4.0, 4.0], "our_rating": 3.5}
+    result = analyze_position_node(state)
+    assert result["band"] == {"low": 35, "high": 80, "mid": 57.5}
+    assert result["gap"] == pytest.approx(-0.5)
+    assert result["target_label"] == "low"
+    assert set(result.keys()) == {"band", "gap", "target_label"}
+
+
+# --- resolve_target_price_node ---
+def test_resolve_target_price_node_no_tie():
+    comp_details = [
+        {"comp_price": 80, "comp_rating": 4.5},
+        {"comp_price": 40, "comp_rating": 4.2},
+        {"comp_price": 35, "comp_rating": 3.8},
+    ]
+    state = {
+        "target_label": "mid",
+        "gap": -0.16666666666666696,
+        "band": {"low": 35, "high": 80, "mid": 57.5},
+        "our_rating": 4.0,
+        "comp_details": comp_details,
+    }
+    result = resolve_target_price_node(state)
+    assert result == {"target_price": 57.5, "cleared_comp": None, "target_source": "band"}
+
+def test_resolve_target_price_node_tie():
+    comp_details = [
+        {"comp_price": 80, "comp_rating": 4.5},
+        {"comp_price": 40, "comp_rating": 4.0},
+        {"comp_price": 35, "comp_rating": 3.8},
+    ]
+    state = {
+        "target_label": "mid",
+        "gap": -0.10000000000000053,
+        "band": {"low": 35, "high": 80, "mid": 57.5},
+        "our_rating": 4.0,
+        "comp_details": comp_details,
+    }
+    result = resolve_target_price_node(state)
+    assert result == {
+        "target_price": 40,
+        "cleared_comp": {"comp_price": 80, "comp_rating": 4.5},
+        "target_source": "tie_match",
+    }
+
+
+# --- compute_step_node ---
+def test_compute_step_node_direct_ignores_llm_step_pct():
+    state = {"path": "direct", "current_price": 39, "target_price": 41, "anchor": 40, "llm_step_pct": 0.02}
+    result = compute_step_node(state)
+    assert result == {"price": 41}
+
+def test_compute_step_node_llm_partial_step():
+    state = {"path": "llm", "current_price": 39, "target_price": 41, "anchor": 40, "llm_step_pct": 0.02}
+    result = compute_step_node(state)
+    assert result["price"] == pytest.approx(39.8)
+
+
+# --- enforce_bounds_node ---
+def test_enforce_bounds_node_within_bounds():
+    state = {"product_id": "g4", "price": 50, "min_price": 10, "max_price": 100}
+    result = enforce_bounds_node(state)
+    assert result == {"price": 50, "bounds_clamped": False}
+
+def test_enforce_bounds_node_below_floor():
+    state = {"product_id": "g4", "price": 5, "min_price": 10, "max_price": 100}
+    result = enforce_bounds_node(state)
+    assert result == {"price": 10, "bounds_clamped": True}
+
+def test_enforce_bounds_node_above_ceiling():
+    state = {"product_id": "g4", "price": 150, "min_price": 10, "max_price": 100}
+    result = enforce_bounds_node(state)
+    assert result == {"price": 100, "bounds_clamped": True}
+
+def test_enforce_bounds_node_exactly_on_floor_not_clamped():
+    state = {"product_id": "g4", "price": 10, "min_price": 10, "max_price": 100}
+    result = enforce_bounds_node(state)
+    assert result == {"price": 10, "bounds_clamped": False}
+
+
+# --- no_action_node ---
+def test_no_action_node_returns_empty_dict():
+    assert no_action_node({"action": "none"}) == {}
+
+
+# --- persist_node, direct ---
+def test_persist_node_rounding_branch_no_change(_mock_staging_db):
+    conn = _mock_staging_db
+    state = {
+        "product_id": "g4",
+        "observed_at": "01-09-2018 10:00",
+        "observed_date": datetime(2018, 9, 1, 10, 0),
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "price": 39.004,
+        "current_price": 39,
+        "anchor": 39,
+        "action": "proceed",
+        "reason": "No change: price stays at 39.00.",
+    }
+    result = persist_node(state)
+    assert result == {}
+
+    outcome = conn.execute("SELECT outcome FROM decisions WHERE product_id = ?", ("g4",)).fetchone()[0]
+    assert outcome == "no_change"
+
+    current_price = conn.execute(
+        "SELECT current_price FROM monthly_state WHERE product_id = ? AND month = ?", ("g4", "2018-09"),
+    ).fetchone()[0]
+    assert current_price == 39.0
+
+def test_persist_node_no_anchor_or_current_price_skips_monthly_state(_mock_staging_db):
+    conn = _mock_staging_db
+    state = {
+        "product_id": "g4",
+        "observed_at": "01-09-2018 10:00",
+        "comp_prices": [100, 55, 39.0],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "escalation_cause": "competitor_move",
+        "tier": "high",
+        "reason": "Escalated (high): 2 competitor(s) moved 30% or more in one observation.",
+        "detail_pack": {
+            "triggered": [{"index": 0, "comp_price_new": 100, "comp_price_prev": 74, "percent_change": 35.1}],
+            "comp_prices": [100, 55, 39.0],
+            "prev_comp_prices": [74, 39.24, 39.24],
+        },
+    }
+    result = persist_node(state)
+    assert result == {}
+
+    count = conn.execute("SELECT COUNT(*) FROM decisions WHERE product_id = ?", ("g4",)).fetchone()[0]
+    assert count == 1
+
+    monthly_rows = conn.execute("SELECT COUNT(*) FROM monthly_state WHERE product_id = ?", ("g4",)).fetchone()[0]
+    assert monthly_rows == 0
+
+
+# --- route_comp_move_check ---
+def test_route_comp_move_check_trigger():
+    assert route_comp_move_check({"action": "trigger"}) == "trigger"
+
+def test_route_comp_move_check_none():
+    assert route_comp_move_check({"action": "none"}) == "none"
+
+def test_route_comp_move_check_proceed():
+    assert route_comp_move_check({"action": "proceed"}) == "proceed"
+
+def test_route_comp_move_check_unknown_raises():
+    with pytest.raises(ValueError):
+        route_comp_move_check({"action": "something_else"})
+
+
+# --- route_check_move_size ---
+def test_route_check_move_size_escalate():
+    assert route_check_move_size({"path": "escalate"}) == "escalate"
+
+def test_route_check_move_size_llm():
+    assert route_check_move_size({"path": "llm"}) == "llm"
+
+def test_route_check_move_size_direct():
+    assert route_check_move_size({"path": "direct"}) == "direct"
+
+def test_route_check_move_size_unknown_raises():
+    with pytest.raises(ValueError):
+        route_check_move_size({"path": "something_else"})
+
+
+# --- route_llm_step_size ---
+def test_route_llm_step_size_llm_failed_escalates():
+    assert route_llm_step_size({"escalation_cause": "llm_failed"}) == "escalate"
+
+def test_route_llm_step_size_no_escalation_cause_computes_step():
+    assert route_llm_step_size({}) == "compute_step"
+
+def test_route_llm_step_size_other_escalation_cause_computes_step():
+    assert route_llm_step_size({"escalation_cause": "cap_exceeded"}) == "compute_step"
