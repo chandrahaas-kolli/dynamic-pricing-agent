@@ -1,0 +1,20 @@
+[project]
+name = "dynamic-pricing-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "awscrt==0.36.0",
+    "langchain-aws==1.7.9",
+    "langchain-core==1.6.3",
+    "langgraph==1.2.11",
+    "pandas==3.0.5",
+    "pydantic==2.13.5",
+    "python-dateutil==2.9.0.post0",
+    "python-dotenv==1.2.3",
+    "typing-extensions==4.16.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
