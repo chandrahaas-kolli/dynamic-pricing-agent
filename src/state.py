@@ -5,6 +5,7 @@ from typing_extensions import NotRequired
 
 class CompEntry(TypedDict):
     """One competitor: price + rating, from pair_competitors."""
+
     comp_price: float
     comp_rating: float
 

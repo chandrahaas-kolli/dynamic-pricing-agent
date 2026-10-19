@@ -58,7 +58,17 @@ def init_db(conn):
 
 
 def record_decision(
-    conn, product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, input_hash, inputs,
+    conn,
+    product_id,
+    observed_at,
+    outcome,
+    price,
+    escalation_cause,
+    tier,
+    reason,
+    brief,
+    input_hash,
+    inputs,
 ):
     """Insert one row into decisions.
 
@@ -80,7 +90,18 @@ def record_decision(
                 (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief, input_hash, inputs)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (product_id, observed_at, outcome, price, escalation_cause, tier, reason, brief_json, input_hash, inputs_json),
+            (
+                product_id,
+                observed_at,
+                outcome,
+                price,
+                escalation_cause,
+                tier,
+                reason,
+                brief_json,
+                input_hash,
+                inputs_json,
+            ),
         )
 
 
@@ -104,7 +125,9 @@ def find_decision(conn, product_id, observed_at):
         return None
     columns = [description[0] for description in cursor.description]
     decision = dict(zip(columns, row))
-    decision["brief"] = json.loads(decision["brief"]) if decision["brief"] is not None else None
+    decision["brief"] = (
+        json.loads(decision["brief"]) if decision["brief"] is not None else None
+    )
     decision["inputs"] = json.loads(decision["inputs"])
     return decision
 

@@ -1,4 +1,5 @@
 """Pydantic schemas for structured LLM outputs used by the pricing agent."""
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
