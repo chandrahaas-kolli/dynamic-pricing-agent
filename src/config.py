@@ -1,5 +1,6 @@
 """Runtime configuration read from the environment (.env in development), with
 non-secret defaults so importing this module never requires a .env file."""
+
 import os
 
 from dotenv import load_dotenv

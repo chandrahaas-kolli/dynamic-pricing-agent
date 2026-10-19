@@ -13,13 +13,19 @@ def validate_prices(product_id, comp_prices):
     """Check competitor prices are well-formed. Raises TypeError or ValueError if not."""
 
     if len(comp_prices) != 3:
-        raise ValueError(f'Invalid competitor prices for {product_id}: {comp_prices}, must have 3 values')
+        raise ValueError(
+            f"Invalid competitor prices for {product_id}: {comp_prices}, must have 3 values"
+        )
 
     for comp in comp_prices:
         if isinstance(comp, bool) or not isinstance(comp, (int, float)):
-            raise TypeError(f'Invalid datatype for competitor price for {product_id}: {comp!r}, must be a number')
+            raise TypeError(
+                f"Invalid datatype for competitor price for {product_id}: {comp!r}, must be a number"
+            )
         elif comp <= 0:
-            raise ValueError(f'Invalid entry for competitor price for {product_id}: {comp}, must be greater than 0')
+            raise ValueError(
+                f"Invalid entry for competitor price for {product_id}: {comp}, must be greater than 0"
+            )
 
     return comp_prices
 
@@ -28,13 +34,19 @@ def validate_ratings(product_id, comp_ratings):
     """Check competitor ratings are well-formed. Raises TypeError or ValueError if not."""
 
     if len(comp_ratings) != 3:
-        raise ValueError(f'Invalid number of ratings for {product_id}: {len(comp_ratings)}, must be exactly 3')
+        raise ValueError(
+            f"Invalid number of ratings for {product_id}: {len(comp_ratings)}, must be exactly 3"
+        )
 
     for rating in comp_ratings:
         if isinstance(rating, bool) or not isinstance(rating, (int, float)):
-            raise TypeError(f'Invalid rating type for {product_id}: {rating!r}, must be a number')
+            raise TypeError(
+                f"Invalid rating type for {product_id}: {rating!r}, must be a number"
+            )
         elif rating <= 0 or rating > 5.0:
-            raise ValueError(f'Invalid rating value for {product_id}: {rating}, must be in range (0, 5.0]')
+            raise ValueError(
+                f"Invalid rating value for {product_id}: {rating}, must be in range (0, 5.0]"
+            )
 
     return comp_ratings
 
@@ -43,9 +55,13 @@ def validate_our_rating(product_id, our_rating):
     """Check our_rating is well-formed. Raises TypeError or ValueError if not."""
 
     if isinstance(our_rating, bool) or not isinstance(our_rating, (int, float)):
-        raise TypeError(f'Invalid our_rating type for {product_id}: {our_rating!r}, must be a number')
+        raise TypeError(
+            f"Invalid our_rating type for {product_id}: {our_rating!r}, must be a number"
+        )
     elif our_rating <= 0 or our_rating > 5.0:
-        raise ValueError(f'Invalid our_rating value for {product_id}: {our_rating}, must be in range (0, 5.0]')
+        raise ValueError(
+            f"Invalid our_rating value for {product_id}: {our_rating}, must be in range (0, 5.0]"
+        )
 
     return our_rating
 
@@ -56,7 +72,7 @@ def validate_observed_at(product_id, observed_at):
         return datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
     except ValueError:
         raise ValueError(
-            f'Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY HH:MM'
+            f"Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY HH:MM"
         )
 
 
@@ -66,7 +82,7 @@ def validate_last_observed_mon_yr(product_id, last_observed_mon_yr):
         return datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
     except ValueError:
         raise ValueError(
-            f'Invalid last_observed_mon_yr for {product_id}: {last_observed_mon_yr!r}, expected format DD-MM-YYYY'
+            f"Invalid last_observed_mon_yr for {product_id}: {last_observed_mon_yr!r}, expected format DD-MM-YYYY"
         )
 
 
@@ -80,19 +96,27 @@ def check_continuity(product_id, last_observed_mon_yr, observed_at):
     new = datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
     next_month = prev + relativedelta(months=1)
 
-    same_month = (new.year == prev.year and new.month == prev.month)
-    is_next_month = (new.year == next_month.year and new.month == next_month.month)
+    same_month = new.year == prev.year and new.month == prev.month
+    is_next_month = new.year == next_month.year and new.month == next_month.month
 
     if not (same_month or is_next_month):
         raise ValueError(
-            f'Invalid observed_at for {product_id}: {observed_at}, '
-            f'must be the same month as {last_observed_mon_yr} or the next one'
+            f"Invalid observed_at for {product_id}: {observed_at}, "
+            f"must be the same month as {last_observed_mon_yr} or the next one"
         )
-        
+
     return new
 
 
-def validate_input(product_id, comp_prices, comp_ratings, our_rating, observed_at, last_observed_mon_yr, prev_comp_prices):
+def validate_input(
+    product_id,
+    comp_prices,
+    comp_ratings,
+    our_rating,
+    observed_at,
+    last_observed_mon_yr,
+    prev_comp_prices,
+):
     """Validate every raw input: competitor and previous competitor prices, competitor
     ratings, our_rating, observed_at, last_observed_mon_yr, and their continuity.
     Raises ValueError/TypeError if any is invalid; returns the parsed observed_at.
@@ -120,19 +144,28 @@ def observation_fingerprint(comp_prices, comp_ratings, our_rating):
     comp_prices = [round(float(comp_price), 2) for comp_price in comp_prices]
     comp_ratings = [round(float(comp_rating), 2) for comp_rating in comp_ratings]
     our_rating = round(float(our_rating), 2)
-    data = {"comp_prices": comp_prices, "comp_ratings": comp_ratings, "our_rating": our_rating}
+    data = {
+        "comp_prices": comp_prices,
+        "comp_ratings": comp_ratings,
+        "our_rating": our_rating,
+    }
     text = json.dumps(data, sort_keys=True)
     digest = hashlib.sha256(text.encode()).hexdigest()
     return digest
 
 
 def pair_competitors(product_id, comp_prices, comp_ratings):
-    return [{"comp_price" : comp_price, "comp_rating" : comp_rating}
-            for comp_price, comp_rating in zip(comp_prices, comp_ratings)]
+    return [
+        {"comp_price": comp_price, "comp_rating": comp_rating}
+        for comp_price, comp_rating in zip(comp_prices, comp_ratings)
+    ]
 
 
 def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
-    percent_diff = [(new - prev) * 100 / prev for new, prev in zip(new_comp_prices, prev_comp_prices)]
+    percent_diff = [
+        (new - prev) * 100 / prev
+        for new, prev in zip(new_comp_prices, prev_comp_prices)
+    ]
 
     high_hits = [i for i, val in enumerate(percent_diff) if abs(val) >= 30]
     if high_hits:
@@ -156,7 +189,12 @@ def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
     if not moved:
         return {"tier": "low", "escalate": False, "action": "none"}
 
-    return {"tier": "low", "escalate": False, "action": "proceed", "percent_diff": percent_diff}
+    return {
+        "tier": "low",
+        "escalate": False,
+        "action": "proceed",
+        "percent_diff": percent_diff,
+    }
 
 
 def build_band(comp_prices):
@@ -174,7 +212,7 @@ def build_band(comp_prices):
         "high": high,
         "mid": mid,
     }
-    return band    
+    return band
 
 
 def rating_gap(our_rating, comp_ratings):
@@ -214,7 +252,11 @@ def resolve_target_price(target_label, gap, band, our_rating, comp_details):
         if highest_tied["comp_price"] < cheapest_above_us["comp_price"]:
             return highest_tied["comp_price"], cheapest_above_us, "tie_match"
         else:
-            return cheapest_above_us["comp_price"] - epsilon, cheapest_above_us, "tie_undercut"
+            return (
+                cheapest_above_us["comp_price"] - epsilon,
+                cheapest_above_us,
+                "tie_undercut",
+            )
 
     is_top_rated = not rated_above_us
     if target_label == "high" and is_top_rated:
@@ -340,9 +382,9 @@ def months_to_reach(anchor, target, cap=0.10):
         ValueError: if anchor or target is not greater than 0.
     """
     if anchor <= 0:
-        raise ValueError(f'Invalid anchor: {anchor}, must be greater than 0')
+        raise ValueError(f"Invalid anchor: {anchor}, must be greater than 0")
     if target <= 0:
-        raise ValueError(f'Invalid target: {target}, must be greater than 0')
+        raise ValueError(f"Invalid target: {target}, must be greater than 0")
     if target == anchor:
         return 0
 

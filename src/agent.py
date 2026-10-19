@@ -38,9 +38,12 @@ from src import staging
 from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION, STAGING_DB_PATH
 from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
 from src.prompts import (
-    STEP_SIZE_HUMAN_TEMPLATE, STEP_SIZE_SYSTEM_PROMPT,
-    CAP_BRIEF_HUMAN_TEMPLATE, CAP_BRIEF_SYSTEM_PROMPT,
-    MARKET_BRIEF_HUMAN_TEMPLATE, MARKET_BRIEF_SYSTEM_PROMPT,
+    STEP_SIZE_HUMAN_TEMPLATE,
+    STEP_SIZE_SYSTEM_PROMPT,
+    CAP_BRIEF_HUMAN_TEMPLATE,
+    CAP_BRIEF_SYSTEM_PROMPT,
+    MARKET_BRIEF_HUMAN_TEMPLATE,
+    MARKET_BRIEF_SYSTEM_PROMPT,
 )
 from src.state import PipelineState
 from src.pricing import (
@@ -62,6 +65,7 @@ from src.pricing import (
 
 # ---------- LLM ----------
 
+
 @lru_cache(maxsize=1)
 def get_step_llm():
     """Return the step-size model, created on first use and reused afterwards.
@@ -69,21 +73,27 @@ def get_step_llm():
     Created lazily so importing this module needs no AWS credentials, which
     keeps tests and CI independent of AWS.
     """
-    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    llm = ChatBedrockConverse(
+        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+    )
     return llm.with_structured_output(StepDecision, include_raw=True)
 
 
 @lru_cache(maxsize=1)
 def get_cap_brief_llm():
     """Return the cap-exceeded brief model, created on first use and reused afterwards."""
-    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    llm = ChatBedrockConverse(
+        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+    )
     return llm.with_structured_output(CapExceededBrief, include_raw=True)
 
 
 @lru_cache(maxsize=1)
 def get_market_brief_llm():
     """Return the market-move brief model, created on first use and reused afterwards."""
-    llm = ChatBedrockConverse(model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0)
+    llm = ChatBedrockConverse(
+        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+    )
     return llm.with_structured_output(MarketMoveBrief, include_raw=True)
 
 
@@ -138,7 +148,9 @@ def describe_target(target_source, target_label):
     return TARGET_REASONS[target_source].format(target_label=target_label)
 
 
-def build_market_move_text(comp_prices, prev_comp_prices, comp_ratings, percent_diff, triggered):
+def build_market_move_text(
+    comp_prices, prev_comp_prices, comp_ratings, percent_diff, triggered
+):
     """Format competitors as one line each: previous price, new price,
     percent change, rating, and whether that competitor triggered the
     30%+ move check.
@@ -148,7 +160,9 @@ def build_market_move_text(comp_prices, prev_comp_prices, comp_ratings, percent_
     """
     triggered_indexes = {t["index"] for t in triggered}
     lines = []
-    for i, (prev, new, rating) in enumerate(zip(prev_comp_prices, comp_prices, comp_ratings)):
+    for i, (prev, new, rating) in enumerate(
+        zip(prev_comp_prices, comp_prices, comp_ratings)
+    ):
         line = f"- Competitor {i + 1}: {prev:.2f} -> {new:.2f} ({percent_diff[i]:+.1f}%), rating {rating}"
         if i in triggered_indexes:
             line += " [moved 30%+]"
@@ -242,7 +256,10 @@ def _cap_brief(state):
         band_high=state["band"]["high"],
         competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
     )
-    messages = [SystemMessage(content=CAP_BRIEF_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+    messages = [
+        SystemMessage(content=CAP_BRIEF_SYSTEM_PROMPT),
+        HumanMessage(content=human_text),
+    ]
 
     parsed, llm_errors, attempts = invoke_with_retries(get_cap_brief_llm(), messages)
 
@@ -265,11 +282,17 @@ def _market_brief(state):
         triggered_count=len(state["triggered"]),
         total_count=len(state["comp_prices"]),
         competitors=build_market_move_text(
-            state["comp_prices"], state["prev_comp_prices"], state["comp_ratings"],
-            state["percent_diff"], state["triggered"]
+            state["comp_prices"],
+            state["prev_comp_prices"],
+            state["comp_ratings"],
+            state["percent_diff"],
+            state["triggered"],
         ),
     )
-    messages = [SystemMessage(content=MARKET_BRIEF_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+    messages = [
+        SystemMessage(content=MARKET_BRIEF_SYSTEM_PROMPT),
+        HumanMessage(content=human_text),
+    ]
 
     parsed, llm_errors, attempts = invoke_with_retries(get_market_brief_llm(), messages)
 
@@ -280,14 +303,20 @@ def _market_brief(state):
 # A node reads the state and returns a dict of only the keys it changes.
 # LangGraph merges that dict into the state.
 
+
 def validate_input_node(state: PipelineState) -> Dict:
     """Validate inputs and store the parsed datetime in observed_date.
 
     observed_at is left untouched.
     """
     parsed = validate_input(
-        state["product_id"], state["comp_prices"], state["comp_ratings"], state["our_rating"],
-        state["observed_at"], state["last_observed_mon_yr"], state["prev_comp_prices"]
+        state["product_id"],
+        state["comp_prices"],
+        state["comp_ratings"],
+        state["our_rating"],
+        state["observed_at"],
+        state["last_observed_mon_yr"],
+        state["prev_comp_prices"],
     )
     return {"observed_date": parsed}
 
@@ -308,7 +337,9 @@ def gate_node(state: PipelineState) -> Dict:
     even if the product has since been held.
     """
     conn = get_connection()
-    new_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+    new_hash = observation_fingerprint(
+        state["comp_prices"], state["comp_ratings"], state["our_rating"]
+    )
     stored = staging.find_decision(conn, state["product_id"], state["observed_at"])
     if stored is not None:
         if stored["input_hash"] == new_hash:
@@ -378,8 +409,11 @@ def resolve_target_price_node(state: PipelineState) -> Dict:
     Runs only on the proceed path.
     """
     target_price, cleared_comp, target_source = resolve_target_price(
-        state["target_label"], state["gap"], state["band"],
-        state["our_rating"], state["comp_details"]
+        state["target_label"],
+        state["gap"],
+        state["band"],
+        state["our_rating"],
+        state["comp_details"],
     )
     return {
         "target_price": target_price,
@@ -449,7 +483,10 @@ def llm_step_size_node(state: PipelineState) -> Dict:
         our_rating=state["our_rating"],
         competitors=build_competitors_text(state["our_rating"], state["comp_details"]),
     )
-    messages = [SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT), HumanMessage(content=human_text)]
+    messages = [
+        SystemMessage(content=STEP_SIZE_SYSTEM_PROMPT),
+        HumanMessage(content=human_text),
+    ]
 
     parsed, llm_errors, attempts = invoke_with_retries(get_step_llm(), messages)
 
@@ -480,8 +517,7 @@ def compute_step_node(state: PipelineState) -> Dict:
     """
     step_pct = state.get("llm_step_pct") if state["path"] == "llm" else None
     price = compute_step(
-        state["current_price"], state["target_price"],
-        state["anchor"], step_pct
+        state["current_price"], state["target_price"], state["anchor"], step_pct
     )
     return {"price": price}
 
@@ -606,7 +642,9 @@ def reason_node(state: PipelineState) -> Dict:
     None), so the human reviewer knows no automated brief is waiting.
     """
     if state.get("gate") == "held":
-        return {"reason": "Held: an open escalation is awaiting human review; price unchanged."}
+        return {
+            "reason": "Held: an open escalation is awaiting human review; price unchanged."
+        }
 
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -668,11 +706,23 @@ def reason_node(state: PipelineState) -> Dict:
         raise ValueError(f"unexpected target_source: {target_source}")
 
     clauses = []
-    if path == "llm" and round(price, 2) != round(target_price, 2) and not dominance_clamped and not bounds_clamped:
+    if (
+        path == "llm"
+        and round(price, 2) != round(target_price, 2)
+        and not dominance_clamped
+        and not bounds_clamped
+    ):
         clauses.append(f"Partial step toward {target_price:.2f}.")
-    if dominance_clamped and dominance_side not in ("below_higher_rated", "above_lower_rated"):
+    if dominance_clamped and dominance_side not in (
+        "below_higher_rated",
+        "above_lower_rated",
+    ):
         raise ValueError(f"unexpected dominance_side: {dominance_side}")
-    if dominance_clamped and not (bounds_clamped and price == min_price) and not (bounds_clamped and price == max_price):
+    if (
+        dominance_clamped
+        and not (bounds_clamped and price == min_price)
+        and not (bounds_clamped and price == max_price)
+    ):
         if dominance_side == "below_higher_rated":
             clauses.append("Clamped below a higher-rated competitor.")
         elif dominance_side == "above_lower_rated":
@@ -726,16 +776,29 @@ def persist_node(state: PipelineState) -> Dict:
         "comp_ratings": state["comp_ratings"],
         "our_rating": state["our_rating"],
     }
-    input_hash = observation_fingerprint(state["comp_prices"], state["comp_ratings"], state["our_rating"])
+    input_hash = observation_fingerprint(
+        state["comp_prices"], state["comp_ratings"], state["our_rating"]
+    )
 
     if state.get("gate") == "conflict":
-        staging.open_escalation(conn, state["product_id"], "data_conflict", state["detail_pack"])
+        staging.open_escalation(
+            conn, state["product_id"], "data_conflict", state["detail_pack"]
+        )
         return {}
 
     if state.get("gate") == "held":
         staging.record_decision(
-            conn, state["product_id"], state["observed_at"], "held",
-            None, None, None, state["reason"], None, input_hash, inputs,
+            conn,
+            state["product_id"],
+            state["observed_at"],
+            "held",
+            None,
+            None,
+            None,
+            state["reason"],
+            None,
+            input_hash,
+            inputs,
         )
         return {}
 
@@ -749,23 +812,41 @@ def persist_node(state: PipelineState) -> Dict:
         outcome = "priced"
 
     staging.record_decision(
-        conn, state["product_id"], state["observed_at"], outcome,
-        state.get("price"), state.get("escalation_cause"), state.get("tier"),
-        state["reason"], state.get("brief"), input_hash, inputs,
+        conn,
+        state["product_id"],
+        state["observed_at"],
+        outcome,
+        state.get("price"),
+        state.get("escalation_cause"),
+        state.get("tier"),
+        state["reason"],
+        state.get("brief"),
+        input_hash,
+        inputs,
     )
 
     if "anchor" in state and "current_price" in state:
         month = state["observed_date"].strftime("%Y-%m")
-        current_price = state["price"] if outcome == "priced" else state["current_price"]
-        staging.upsert_monthly_state(conn, state["product_id"], month, state["anchor"], current_price)
+        current_price = (
+            state["price"] if outcome == "priced" else state["current_price"]
+        )
+        staging.upsert_monthly_state(
+            conn, state["product_id"], month, state["anchor"], current_price
+        )
 
     if outcome == "escalated":
-        staging.open_escalation(conn, state["product_id"], state["escalation_cause"], state.get("detail_pack"))
+        staging.open_escalation(
+            conn,
+            state["product_id"],
+            state["escalation_cause"],
+            state.get("detail_pack"),
+        )
 
     return {}
 
 
 # ---------- Routing ----------
+
 
 def route_gate(state: PipelineState) -> str:
     """Return the branch label for the gate set by gate_node."""
@@ -793,7 +874,9 @@ def route_check_move_size(state: PipelineState) -> str:
 
 def route_llm_step_size(state: PipelineState) -> str:
     """Return 'escalate' if the step-size call failed after retries, else 'compute_step'."""
-    outcome = "escalate" if state.get("escalation_cause") == "llm_failed" else "compute_step"
+    outcome = (
+        "escalate" if state.get("escalation_cause") == "llm_failed" else "compute_step"
+    )
     for route in ("escalate", "compute_step"):
         if outcome == route:
             return route
@@ -841,7 +924,11 @@ graph.add_conditional_edges(
 graph.add_conditional_edges(
     "competitor_move_check_node",
     route_comp_move_check,
-    {"trigger": "escalate_node", "none": "no_action_node", "proceed": "pair_competitors_node"},
+    {
+        "trigger": "escalate_node",
+        "none": "no_action_node",
+        "proceed": "pair_competitors_node",
+    },
 )
 
 # Proceed path
@@ -852,7 +939,11 @@ graph.add_edge("resolve_target_price_node", "check_move_size_node")
 graph.add_conditional_edges(
     "check_move_size_node",
     route_check_move_size,
-    {"escalate": "escalate_node", "llm": "llm_step_size_node", "direct": "compute_step_node"},
+    {
+        "escalate": "escalate_node",
+        "llm": "llm_step_size_node",
+        "direct": "compute_step_node",
+    },
 )
 
 graph.add_conditional_edges(
