@@ -136,6 +136,12 @@ def test_validate_observed_at_invalid_time_raises():
         validate_observed_at("g4", "01-09-2018 25:00")
 
 
+def test_validate_observed_at_bad_format_chains_cause():
+    with pytest.raises(ValueError) as exc_info:
+        validate_observed_at("g4", "not-a-date")
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
 # --- check_continuity ---
 def test_check_continuity_same_month():
     result = check_continuity("g4", "01-08-2026", "01-08-2026 10:00")
@@ -310,6 +316,11 @@ def test_pair_competitors():
         {"comp_price": 120, "comp_rating": 4.0},
         {"comp_price": 90, "comp_rating": 4.1},
     ]
+
+
+def test_pair_competitors_mismatched_lengths_raises():
+    with pytest.raises(ValueError):
+        pair_competitors("bed4", [105, 120, 90], [4.2, 4.0])
 
 
 # --- competitor_move_check ---

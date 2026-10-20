@@ -70,20 +70,20 @@ def validate_observed_at(product_id, observed_at):
     """Check observed_at is a parseable timestamp in DD-MM-YYYY HH:MM format. Raises ValueError if not."""
     try:
         return datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
-    except ValueError:
+    except ValueError as err:
         raise ValueError(
             f"Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY HH:MM"
-        )
+        ) from err
 
 
 def validate_last_observed_mon_yr(product_id, last_observed_mon_yr):
     """Check last_observed_mon_yr is a parseable date in DD-MM-YYYY format. Raises ValueError if not."""
     try:
         return datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
-    except ValueError:
+    except ValueError as err:
         raise ValueError(
             f"Invalid last_observed_mon_yr for {product_id}: {last_observed_mon_yr!r}, expected format DD-MM-YYYY"
-        )
+        ) from err
 
 
 def check_continuity(product_id, last_observed_mon_yr, observed_at):
@@ -157,14 +157,14 @@ def observation_fingerprint(comp_prices, comp_ratings, our_rating):
 def pair_competitors(product_id, comp_prices, comp_ratings):
     return [
         {"comp_price": comp_price, "comp_rating": comp_rating}
-        for comp_price, comp_rating in zip(comp_prices, comp_ratings)
+        for comp_price, comp_rating in zip(comp_prices, comp_ratings, strict=True)
     ]
 
 
 def competitor_move_check(product_id, new_comp_prices, prev_comp_prices):
     percent_diff = [
         (new - prev) * 100 / prev
-        for new, prev in zip(new_comp_prices, prev_comp_prices)
+        for new, prev in zip(new_comp_prices, prev_comp_prices, strict=True)
     ]
 
     high_hits = [i for i, val in enumerate(percent_diff) if abs(val) >= 30]

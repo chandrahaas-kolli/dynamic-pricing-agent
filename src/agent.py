@@ -159,7 +159,7 @@ def build_market_move_text(
     triggered_indexes = {t["index"] for t in triggered}
     lines = []
     for i, (prev, new, rating) in enumerate(
-        zip(prev_comp_prices, comp_prices, comp_ratings)
+        zip(prev_comp_prices, comp_prices, comp_ratings, strict=True)
     ):
         line = f"- Competitor {i + 1}: {prev:.2f} -> {new:.2f} ({percent_diff[i]:+.1f}%), rating {rating}"
         if i in triggered_indexes:

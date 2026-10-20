@@ -124,7 +124,7 @@ def find_decision(conn, product_id, observed_at):
     if row is None:
         return None
     columns = [description[0] for description in cursor.description]
-    decision = dict(zip(columns, row))
+    decision = dict(zip(columns, row, strict=True))
     decision["brief"] = (
         json.loads(decision["brief"]) if decision["brief"] is not None else None
     )
@@ -165,7 +165,7 @@ def get_monthly_state(conn, product_id, month):
     if row is None:
         return None
     columns = [description[0] for description in cursor.description]
-    return dict(zip(columns, row))
+    return dict(zip(columns, row, strict=True))
 
 
 def open_escalation(conn, product_id, cause, detail=None):
