@@ -1,0 +1,5 @@
+# Commits that only reformat code. `git blame` skips these so it shows
+# the commit that actually wrote each line.
+
+# style: apply ruff format
+7bb36f001a20ca3cfd7b95598c2dcc7d130262dc
