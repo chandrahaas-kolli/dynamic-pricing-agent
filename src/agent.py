@@ -697,6 +697,10 @@ def reason_node(state: PipelineState) -> dict:
     elif target_source == "tie_match":
         text = f"Priced at {price:.2f}: target matches an equally rated competitor at {target_price:.2f}."
     elif target_source == "tie_undercut":
+        if cleared_comp is None:
+            raise ValueError(
+                f"{state['product_id']}: tie_undercut target requires cleared_comp, got None"
+            )
         text = f"Priced at {price:.2f}: target undercuts the cheapest higher-rated competitor at {cleared_comp['comp_price']:.2f}."
     elif target_source == "top_premium":
         text = f"Priced at {price:.2f}: target is a top-rated premium over the band high ({target_price:.2f})."

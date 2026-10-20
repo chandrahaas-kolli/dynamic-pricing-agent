@@ -1012,6 +1012,7 @@ def test_app_invoke_cap_exceeded_brief_fails_reason_unavailable(monkeypatch):
 def _priced_state(**overrides):
     state = {
         "action": "proceed",
+        "product_id": "g4",
         "price": 50,
         "current_price": 40,
         "target_price": 50,
@@ -1270,6 +1271,17 @@ def test_reason_node_tie_undercut_main_sentence():
         result["reason"]
         == "Priced at 44.99: target undercuts the cheapest higher-rated competitor at 45.00."
     )
+
+
+def test_reason_node_tie_undercut_without_cleared_comp_raises():
+    state = _priced_state(
+        target_source="tie_undercut",
+        price=44.99,
+        current_price=44,
+        target_price=44.99,
+    )
+    with pytest.raises(ValueError, match="requires cleared_comp"):
+        reason_node(state)
 
 
 def test_reason_node_top_premium_main_sentence():
