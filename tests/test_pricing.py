@@ -1,23 +1,24 @@
 import pytest
+
 from src.pricing import (
-    validate_prices,
-    validate_ratings,
-    validate_our_rating,
-    validate_observed_at,
-    check_continuity,
-    validate_input,
-    pair_competitors,
-    competitor_move_check,
-    build_band,
-    rating_gap,
-    choose_target,
-    resolve_target_price,
-    check_move_size,
-    compute_step,
     apply_dominance_clamp,
+    build_band,
+    check_continuity,
+    check_move_size,
+    choose_target,
+    competitor_move_check,
+    compute_step,
     enforce_bounds,
     months_to_reach,
     observation_fingerprint,
+    pair_competitors,
+    rating_gap,
+    resolve_target_price,
+    validate_input,
+    validate_observed_at,
+    validate_our_rating,
+    validate_prices,
+    validate_ratings,
 )
 
 

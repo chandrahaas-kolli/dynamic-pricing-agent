@@ -11,7 +11,6 @@ dependencies = [
     "pydantic==2.13.5",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.3",
-    "typing-extensions==4.16.0",
 ]
 
 [dependency-groups]
@@ -19,3 +18,9 @@ dev = [
     "pytest==9.1.1",
     "ruff==0.17.1",
 ]
+
+[tool.ruff.lint]
+# E4/E7/E9/F are ruff's default error rules, I = import sorting, B = bugbear
+# (common bug patterns), UP = modern Python 3.11 syntax. E501 (line too long)
+# is deliberately off since the formatter wraps code lines.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]

@@ -8,34 +8,34 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 
 from src import staging
 from src.agent import (
-    app,
-    escalate_node,
-    competitor_move_check_node,
-    check_move_size_node,
-    reason_node,
-    apply_dominance_clamp_node,
-    llm_step_size_node,
-    build_competitors_text,
-    describe_target,
-    build_market_move_text,
     _cap_brief,
     _market_brief,
-    get_connection,
-    gate_node,
-    route_gate,
-    validate_input_node,
-    pair_competitors_node,
     analyze_position_node,
-    resolve_target_price_node,
+    app,
+    apply_dominance_clamp_node,
+    build_competitors_text,
+    build_market_move_text,
+    check_move_size_node,
+    competitor_move_check_node,
     compute_step_node,
+    describe_target,
     enforce_bounds_node,
+    escalate_node,
+    gate_node,
+    get_connection,
+    llm_step_size_node,
     no_action_node,
+    pair_competitors_node,
     persist_node,
-    route_comp_move_check,
+    reason_node,
+    resolve_target_price_node,
     route_check_move_size,
+    route_comp_move_check,
+    route_gate,
     route_llm_step_size,
+    validate_input_node,
 )
-from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
+from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
 from src.pricing import observation_fingerprint
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
 
