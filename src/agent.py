@@ -27,41 +27,39 @@ Flow:
 import sqlite3
 import time
 from functools import lru_cache
-from typing import Dict
 
 from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError
 from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 
 from src import staging
 from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION, STAGING_DB_PATH
-from src.llm_schemas import StepDecision, CapExceededBrief, MarketMoveBrief
+from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
+from src.pricing import (
+    apply_dominance_clamp,
+    build_band,
+    check_move_size,
+    choose_target,
+    competitor_move_check,
+    compute_step,
+    enforce_bounds,
+    months_to_reach,
+    observation_fingerprint,
+    pair_competitors,
+    rating_gap,
+    resolve_target_price,
+    validate_input,
+)
 from src.prompts import (
-    STEP_SIZE_HUMAN_TEMPLATE,
-    STEP_SIZE_SYSTEM_PROMPT,
     CAP_BRIEF_HUMAN_TEMPLATE,
     CAP_BRIEF_SYSTEM_PROMPT,
     MARKET_BRIEF_HUMAN_TEMPLATE,
     MARKET_BRIEF_SYSTEM_PROMPT,
+    STEP_SIZE_HUMAN_TEMPLATE,
+    STEP_SIZE_SYSTEM_PROMPT,
 )
 from src.state import PipelineState
-from src.pricing import (
-    validate_input,
-    pair_competitors,
-    competitor_move_check,
-    build_band,
-    rating_gap,
-    choose_target,
-    resolve_target_price,
-    check_move_size,
-    compute_step,
-    apply_dominance_clamp,
-    enforce_bounds,
-    months_to_reach,
-    observation_fingerprint,
-)
-
 
 # ---------- LLM ----------
 
@@ -161,7 +159,7 @@ def build_market_move_text(
     triggered_indexes = {t["index"] for t in triggered}
     lines = []
     for i, (prev, new, rating) in enumerate(
-        zip(prev_comp_prices, comp_prices, comp_ratings)
+        zip(prev_comp_prices, comp_prices, comp_ratings, strict=True)
     ):
         line = f"- Competitor {i + 1}: {prev:.2f} -> {new:.2f} ({percent_diff[i]:+.1f}%), rating {rating}"
         if i in triggered_indexes:
@@ -304,7 +302,7 @@ def _market_brief(state):
 # LangGraph merges that dict into the state.
 
 
-def validate_input_node(state: PipelineState) -> Dict:
+def validate_input_node(state: PipelineState) -> dict:
     """Validate inputs and store the parsed datetime in observed_date.
 
     observed_at is left untouched.
@@ -321,7 +319,7 @@ def validate_input_node(state: PipelineState) -> Dict:
     return {"observed_date": parsed}
 
 
-def gate_node(state: PipelineState) -> Dict:
+def gate_node(state: PipelineState) -> dict:
     """Idempotency and hold gate: decide whether this observation runs at all.
 
     Checks, in this order:
@@ -365,7 +363,7 @@ def gate_node(state: PipelineState) -> Dict:
     return {"gate": "proceed"}
 
 
-def competitor_move_check_node(state: PipelineState) -> Dict:
+def competitor_move_check_node(state: PipelineState) -> dict:
     """Compare new vs previous competitor prices.
 
     Returns the pricing function's dict directly, since its keys vary by
@@ -380,7 +378,7 @@ def competitor_move_check_node(state: PipelineState) -> Dict:
     return result
 
 
-def pair_competitors_node(state: PipelineState) -> Dict:
+def pair_competitors_node(state: PipelineState) -> dict:
     """Pair each competitor price with its rating. Runs only on the proceed path."""
     comp_details = pair_competitors(
         state["product_id"], state["comp_prices"], state["comp_ratings"]
@@ -388,7 +386,7 @@ def pair_competitors_node(state: PipelineState) -> Dict:
     return {"comp_details": comp_details}
 
 
-def analyze_position_node(state: PipelineState) -> Dict:
+def analyze_position_node(state: PipelineState) -> dict:
     """Build the competitor price band, compute the rating gap, and choose the target.
 
     Kept as one node: the three steps always run together with no branching.
@@ -400,7 +398,7 @@ def analyze_position_node(state: PipelineState) -> Dict:
     return {"band": band, "gap": ratings_gap, "target_label": target_label}
 
 
-def resolve_target_price_node(state: PipelineState) -> Dict:
+def resolve_target_price_node(state: PipelineState) -> dict:
     """Set the target price and the competitor already handled, if any.
 
     cleared_comp is set only when we are rating-tied with a competitor and
@@ -422,7 +420,7 @@ def resolve_target_price_node(state: PipelineState) -> Dict:
     }
 
 
-def check_move_size_node(state: PipelineState) -> Dict:
+def check_move_size_node(state: PipelineState) -> dict:
     """Measure the target's distance from the anchor and choose the path.
 
     path is 'escalate' (beyond the monthly cap), 'llm' (small move) or
@@ -448,7 +446,7 @@ def check_move_size_node(state: PipelineState) -> Dict:
     return {"path": path, "x_anchor": x_anchor}
 
 
-def llm_step_size_node(state: PipelineState) -> Dict:
+def llm_step_size_node(state: PipelineState) -> dict:
     """Ask the LLM how large a step to take toward the target (llm path only).
 
     Sends the fixed rules (STEP_SIZE_SYSTEM_PROMPT) and this observation's
@@ -507,7 +505,7 @@ def llm_step_size_node(state: PipelineState) -> Dict:
     }
 
 
-def compute_step_node(state: PipelineState) -> Dict:
+def compute_step_node(state: PipelineState) -> dict:
     """Move the price toward the target and store it in price.
 
     llm_step_pct is set only on the llm path; on the direct path it is
@@ -522,7 +520,7 @@ def compute_step_node(state: PipelineState) -> Dict:
     return {"price": price}
 
 
-def apply_dominance_clamp_node(state: PipelineState) -> Dict:
+def apply_dominance_clamp_node(state: PipelineState) -> dict:
     """Push the price back on the correct side of same-direction-relevant
     competitors: below higher-rated ones moving up, above lower-rated ones
     moving down.
@@ -544,7 +542,7 @@ def apply_dominance_clamp_node(state: PipelineState) -> Dict:
     }
 
 
-def enforce_bounds_node(state: PipelineState) -> Dict:
+def enforce_bounds_node(state: PipelineState) -> dict:
     """Clamp price to the frozen floor/ceiling; bounds win over the dominance
     clamp if they conflict. bounds_clamped records whether it fired.
 
@@ -559,7 +557,7 @@ def enforce_bounds_node(state: PipelineState) -> Dict:
     }
 
 
-def escalate_node(state: PipelineState) -> Dict:
+def escalate_node(state: PipelineState) -> dict:
     """Merged escalation for competitor_move, cap_exceeded, llm_failed and data_conflict.
 
     Decides the detail_pack and whether a brief is needed by
@@ -619,12 +617,12 @@ def escalate_node(state: PipelineState) -> Dict:
     return result
 
 
-def no_action_node(state: PipelineState) -> Dict:
+def no_action_node(state: PipelineState) -> dict:
     """Move below deadband: nothing to price; goes to reason."""
     return {}
 
 
-def reason_node(state: PipelineState) -> Dict:
+def reason_node(state: PipelineState) -> dict:
     """Compose a deterministic, LLM-free explanation of the outcome.
 
     Runs on every path (held, escalated, no-change, and priced) as the
@@ -699,6 +697,10 @@ def reason_node(state: PipelineState) -> Dict:
     elif target_source == "tie_match":
         text = f"Priced at {price:.2f}: target matches an equally rated competitor at {target_price:.2f}."
     elif target_source == "tie_undercut":
+        if cleared_comp is None:
+            raise ValueError(
+                f"{state['product_id']}: tie_undercut target requires cleared_comp, got None"
+            )
         text = f"Priced at {price:.2f}: target undercuts the cheapest higher-rated competitor at {cleared_comp['comp_price']:.2f}."
     elif target_source == "top_premium":
         text = f"Priced at {price:.2f}: target is a top-rated premium over the band high ({target_price:.2f})."
@@ -743,7 +745,7 @@ def reason_node(state: PipelineState) -> Dict:
     return {"reason": text}
 
 
-def persist_node(state: PipelineState) -> Dict:
+def persist_node(state: PipelineState) -> dict:
     """Write this run's decision, and its monthly state if priced, to the staging DB.
 
     Checked before the usual outcome logic:

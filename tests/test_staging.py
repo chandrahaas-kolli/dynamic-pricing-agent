@@ -4,14 +4,14 @@ import sqlite3
 import pytest
 
 from src.staging import (
-    init_db,
-    record_decision,
     find_decision,
-    upsert_monthly_state,
     get_monthly_state,
-    open_escalation,
-    resolve_escalation,
     has_open_escalation,
+    init_db,
+    open_escalation,
+    record_decision,
+    resolve_escalation,
+    upsert_monthly_state,
 )
 
 

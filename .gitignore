@@ -8,3 +8,4 @@ CLAUDE.md
 .claude/
 src/scratch_*.py
 *.db
+*.egg-info/

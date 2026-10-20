@@ -1,23 +1,24 @@
 import pytest
+
 from src.pricing import (
-    validate_prices,
-    validate_ratings,
-    validate_our_rating,
-    validate_observed_at,
-    check_continuity,
-    validate_input,
-    pair_competitors,
-    competitor_move_check,
-    build_band,
-    rating_gap,
-    choose_target,
-    resolve_target_price,
-    check_move_size,
-    compute_step,
     apply_dominance_clamp,
+    build_band,
+    check_continuity,
+    check_move_size,
+    choose_target,
+    competitor_move_check,
+    compute_step,
     enforce_bounds,
     months_to_reach,
     observation_fingerprint,
+    pair_competitors,
+    rating_gap,
+    resolve_target_price,
+    validate_input,
+    validate_observed_at,
+    validate_our_rating,
+    validate_prices,
+    validate_ratings,
 )
 
 
@@ -133,6 +134,12 @@ def test_validate_observed_at_no_time_raises():
 def test_validate_observed_at_invalid_time_raises():
     with pytest.raises(ValueError):
         validate_observed_at("g4", "01-09-2018 25:00")
+
+
+def test_validate_observed_at_bad_format_chains_cause():
+    with pytest.raises(ValueError) as exc_info:
+        validate_observed_at("g4", "not-a-date")
+    assert isinstance(exc_info.value.__cause__, ValueError)
 
 
 # --- check_continuity ---
@@ -309,6 +316,11 @@ def test_pair_competitors():
         {"comp_price": 120, "comp_rating": 4.0},
         {"comp_price": 90, "comp_rating": 4.1},
     ]
+
+
+def test_pair_competitors_mismatched_lengths_raises():
+    with pytest.raises(ValueError):
+        pair_competitors("bed4", [105, 120, 90], [4.2, 4.0])
 
 
 # --- competitor_move_check ---
