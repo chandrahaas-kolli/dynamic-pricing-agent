@@ -30,3 +30,5 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure
       - name: Run tests with coverage
         run: uv run pytest --cov
+      - name: Audit dependencies for vulnerabilities
+        run: uv run pip-audit
