@@ -558,6 +558,20 @@ def test_check_move_size_node_tie_source_still_escalates():
     assert result["escalation_cause"] == "cap_exceeded"
 
 
+def test_check_move_size_node_tie_match_overrides_llm_to_direct():
+    state = {"target_price": 40, "anchor": 39, "target_source": "tie_match"}
+    result = check_move_size_node(state)
+    assert result["path"] == "direct"
+    assert "escalation_cause" not in result
+
+
+def test_check_move_size_node_tie_undercut_overrides_llm_to_direct():
+    state = {"target_price": 40, "anchor": 39, "target_source": "tie_undercut"}
+    result = check_move_size_node(state)
+    assert result["path"] == "direct"
+    assert "escalation_cause" not in result
+
+
 # --- llm_step_size_node (get_step_llm mocked; no test may call Bedrock) ---
 def _llm_state(**overrides):
     state = {
