@@ -676,3 +676,8 @@ def test_months_to_reach_target_equals_anchor():
 def test_months_to_reach_anchor_not_positive():
     with pytest.raises(ValueError):
         months_to_reach(0, 100)
+
+
+def test_months_to_reach_target_not_positive():
+    with pytest.raises(ValueError, match="Invalid target"):
+        months_to_reach(100, 0)

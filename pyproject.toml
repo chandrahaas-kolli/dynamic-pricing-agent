@@ -17,8 +17,10 @@ dependencies = [
 dev = [
     "botocore-stubs==1.43.115",
     "mypy==2.4.0",
+    "pip-audit==2.10.1",
     "pre-commit==4.7.0",
     "pytest==9.1.1",
+    "pytest-cov==7.1.0",
     "ruff==0.17.1",
     "types-python-dateutil==2.9.0.20260807",
 ]
@@ -38,3 +40,16 @@ check_untyped_defs = true
 warn_unused_ignores = true
 # scratch files are gitignored experiments, not part of the codebase
 exclude = ['^src/scratch_.*\.py$']
+
+# run = measure only src/, count both outcomes of every if (branch
+# coverage), skip gitignored scratch files
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = ["src/scratch_*.py"]
+
+# report = list uncovered line numbers
+[tool.coverage.report]
+show_missing = true
+# test run fails if total coverage drops below 98%
+fail_under = 98
