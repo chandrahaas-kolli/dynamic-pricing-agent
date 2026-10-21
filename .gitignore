@@ -9,3 +9,6 @@ CLAUDE.md
 src/scratch_*.py
 *.db
 *.egg-info/
+.coverage
+.coverage.*
+htmlcov/
