@@ -1,28 +1,32 @@
 [project]
 name = "dynamic-pricing-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
+# capped to the only Python version CI tests; raising it is a deliberate PR
+requires-python = ">=3.11,<3.12"
+# exact versions live in uv.lock (installed with `uv sync --locked`);
+# pyproject.toml holds minimum versions so Dependabot can upgrade coupled
+# packages together
 dependencies = [
-    "awscrt==0.37.0",
-    "langchain-aws==1.7.9",
-    "langchain-core==1.6.10",
-    "langgraph==1.2.15",
-    "pandas==3.0.6",
-    "pydantic==2.14.1",
-    "python-dateutil==2.9.0.post0",
-    "python-dotenv==1.2.4",
+    "awscrt>=0.37.0",
+    "langchain-aws>=1.7.9",
+    "langchain-core>=1.6.10",
+    "langgraph>=1.2.15",
+    "pandas>=3.0.6",
+    "pydantic>=2.14.1",
+    "python-dateutil>=2.9.0.post0",
+    "python-dotenv>=1.2.4",
 ]
 
 [dependency-groups]
 dev = [
-    "botocore-stubs==1.43.115",
-    "mypy==2.4.0",
-    "pip-audit==2.10.1",
-    "pre-commit==4.7.0",
-    "pytest==9.1.1",
-    "pytest-cov==7.1.0",
-    "ruff==0.17.1",
-    "types-python-dateutil==2.9.0.20260807",
+    "botocore-stubs>=1.43.115",
+    "mypy>=2.4.0",
+    "pip-audit>=2.10.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.1",
+    "types-python-dateutil>=2.9.0.20260807",
 ]
 
 [tool.ruff.lint]
