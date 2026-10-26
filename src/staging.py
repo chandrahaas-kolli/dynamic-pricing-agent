@@ -72,6 +72,8 @@ def record_decision(
 ):
     """Insert one row into decisions.
 
+    observed_at stores the canonical ISO 8601 UTC key (canonical_timestamp's
+    output), not the caller's raw timestamp text; it is the idempotency key.
     brief is stored as its JSON text (json.dumps), or NULL when brief is None.
     input_hash is the observation_fingerprint of this run's inputs, used by
     the idempotency gate to detect a resend vs a genuine data conflict.
@@ -108,6 +110,8 @@ def record_decision(
 def find_decision(conn, product_id, observed_at):
     """Return the decisions row for product_id/observed_at as a dict, or None if it doesn't exist.
 
+    observed_at is the canonical ISO 8601 UTC key, not raw caller text; pass
+    the same canonical_timestamp output used when the row was recorded.
     brief and inputs are returned as their parsed dicts (json.loads); brief
     is None when NULL.
     """

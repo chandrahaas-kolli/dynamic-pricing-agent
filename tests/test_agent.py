@@ -1,7 +1,7 @@
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -36,7 +36,11 @@ from src.agent import (
     validate_input_node,
 )
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
-from src.pricing import observation_fingerprint
+from src.pricing import (
+    canonical_timestamp,
+    observation_fingerprint,
+    validate_observed_at,
+)
 from src.prompts import STEP_SIZE_SYSTEM_PROMPT
 
 
@@ -142,7 +146,8 @@ def _gate_state(**overrides):
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
         "our_rating": 4.0,
-        "observed_at": "01-09-2018 10:00",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "observed_key": "2018-09-01T10:00:00Z",
     }
     state.update(overrides)
     return state
@@ -167,7 +172,7 @@ def test_gate_node_same_key_same_inputs_duplicate(_mock_staging_db):
     staging.record_decision(
         conn,
         state["product_id"],
-        state["observed_at"],
+        state["observed_key"],
         "priced",
         42.5,
         None,
@@ -198,7 +203,7 @@ def test_gate_node_same_key_different_comp_prices_conflict(_mock_staging_db):
     staging.record_decision(
         conn,
         state["product_id"],
-        state["observed_at"],
+        state["observed_key"],
         "priced",
         42.5,
         None,
@@ -244,7 +249,7 @@ def test_gate_node_same_key_same_inputs_and_open_escalation_still_duplicate(
     staging.record_decision(
         conn,
         state["product_id"],
-        state["observed_at"],
+        state["observed_key"],
         "priced",
         42.5,
         None,
@@ -256,6 +261,42 @@ def test_gate_node_same_key_same_inputs_and_open_escalation_still_duplicate(
     )
     staging.open_escalation(conn, "g4", "cap_exceeded")
     result = gate_node(state)
+    assert result["gate"] == "duplicate"
+
+
+def test_gate_node_duplicate_detected_across_different_spellings_of_same_instant(
+    _mock_staging_db,
+):
+    conn = _mock_staging_db
+    state = _gate_state()
+    input_hash = observation_fingerprint(
+        state["comp_prices"], state["comp_ratings"], state["our_rating"]
+    )
+    inputs = {
+        "comp_prices": state["comp_prices"],
+        "comp_ratings": state["comp_ratings"],
+        "our_rating": state["our_rating"],
+    }
+    staging.record_decision(
+        conn,
+        state["product_id"],
+        state["observed_key"],
+        "priced",
+        42.5,
+        None,
+        "low",
+        "Priced at 42.50.",
+        None,
+        input_hash,
+        inputs,
+    )
+
+    # Same instant, spelled with a +05:30 offset instead of Z -- must still
+    # resolve to the same canonical key and be found as a duplicate.
+    resent_observed_at = "2018-09-01T15:30:00+05:30"
+    resent_key = canonical_timestamp(validate_observed_at("g4", resent_observed_at))
+    resent_state = _gate_state(observed_at=resent_observed_at, observed_key=resent_key)
+    result = gate_node(resent_state)
     assert result["gate"] == "duplicate"
 
 
@@ -923,8 +964,8 @@ base = {
     "product_id": "g4",
     "comp_ratings": [3.9, 4, 4],
     "our_rating": 4.0,
-    "observed_at": "01-09-2018 10:00",
-    "last_observed_mon_yr": "01-08-2018",
+    "observed_at": "2018-09-01T10:00:00Z",
+    "last_observed_mon_yr": "2018-08-01",
     "cleared_comp": None,
 }
 
@@ -1819,7 +1860,7 @@ def test_app_invoke_escalated_run_opens_escalation_priced_run_does_not(
 
     cap_exceeded_proceed = {
         **base,
-        "observed_at": "02-09-2018 10:00",
+        "observed_at": "2018-09-02T10:00:00Z",
         "comp_prices": [80, 40, 35],
         "prev_comp_prices": [74, 39.24, 39.24],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -1854,7 +1895,7 @@ def test_app_invoke_escalate_then_new_observation_held(_mock_staging_db):
     # instead of letting it through to the normal pricing flow.
     held_proceed = {
         **base,
-        "observed_at": "05-09-2018 10:00",
+        "observed_at": "2018-09-05T10:00:00Z",
         "comp_prices": [80, 40, 35],
         "prev_comp_prices": [74, 39.24, 39.24],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -1952,7 +1993,7 @@ def test_app_invoke_held_run_records_held_decision_and_skips_llm(
 
     held_proceed = {
         **base,
-        "observed_at": "05-09-2018 10:00",
+        "observed_at": "2018-09-05T10:00:00Z",
         "comp_prices": [80, 40, 35],
         "prev_comp_prices": [74, 39.24, 39.24],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -1969,7 +2010,7 @@ def test_app_invoke_held_run_records_held_decision_and_skips_llm(
 
     outcome, price = conn.execute(
         "SELECT outcome, price FROM decisions WHERE observed_at = ?",
-        ("05-09-2018 10:00",),
+        ("2018-09-05T10:00:00Z",),
     ).fetchone()
     assert outcome == "held"
     assert price is None
@@ -1989,12 +2030,15 @@ def test_validate_input_node_valid_state():
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
         "our_rating": 4.0,
-        "observed_at": "01-09-2018 10:00",
-        "last_observed_mon_yr": "01-08-2018",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
         "prev_comp_prices": [74, 39.24, 39.24],
     }
     result = validate_input_node(state)
-    assert result == {"observed_date": datetime(2018, 9, 1, 10, 0)}
+    assert result == {
+        "observed_date": datetime(2018, 9, 1, 10, 0, tzinfo=UTC),
+        "observed_key": "2018-09-01T10:00:00Z",
+    }
 
 
 def test_validate_input_node_bad_our_rating_raises():
@@ -2003,8 +2047,8 @@ def test_validate_input_node_bad_our_rating_raises():
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
         "our_rating": 7.5,
-        "observed_at": "01-09-2018 10:00",
-        "last_observed_mon_yr": "01-08-2018",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
         "prev_comp_prices": [74, 39.24, 39.24],
     }
     with pytest.raises(ValueError):
@@ -2171,8 +2215,9 @@ def test_persist_node_rounding_branch_no_change(_mock_staging_db):
     conn = _mock_staging_db
     state = {
         "product_id": "g4",
-        "observed_at": "01-09-2018 10:00",
-        "observed_date": datetime(2018, 9, 1, 10, 0),
+        "observed_at": "2018-09-01T10:00:00Z",
+        "observed_key": "2018-09-01T10:00:00Z",
+        "observed_date": datetime(2018, 9, 1, 10, 0, tzinfo=UTC),
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
         "our_rating": 4.0,
@@ -2201,7 +2246,8 @@ def test_persist_node_no_anchor_or_current_price_skips_monthly_state(_mock_stagi
     conn = _mock_staging_db
     state = {
         "product_id": "g4",
-        "observed_at": "01-09-2018 10:00",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "observed_key": "2018-09-01T10:00:00Z",
         "comp_prices": [100, 55, 39.0],
         "comp_ratings": [4.5, 4.0, 3.8],
         "our_rating": 4.0,

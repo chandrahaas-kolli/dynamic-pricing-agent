@@ -39,6 +39,7 @@ from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
 from src.pricing import (
     apply_dominance_clamp,
     build_band,
+    canonical_timestamp,
     check_move_size,
     choose_target,
     competitor_move_check,
@@ -303,9 +304,10 @@ def _market_brief(state):
 
 
 def validate_input_node(state: PipelineState) -> dict:
-    """Validate inputs and store the parsed datetime in observed_date.
+    """Validate inputs; store the parsed UTC datetime in observed_date and
+    its canonical ISO 8601 UTC string (the idempotency key) in observed_key.
 
-    observed_at is left untouched.
+    observed_at is left untouched (the raw caller string).
     """
     parsed = validate_input(
         state["product_id"],
@@ -316,14 +318,14 @@ def validate_input_node(state: PipelineState) -> dict:
         state["last_observed_mon_yr"],
         state["prev_comp_prices"],
     )
-    return {"observed_date": parsed}
+    return {"observed_date": parsed, "observed_key": canonical_timestamp(parsed)}
 
 
 def gate_node(state: PipelineState) -> dict:
     """Idempotency and hold gate: decide whether this observation runs at all.
 
     Checks, in this order:
-    1. Key (product_id, observed_at) already in decisions with the same
+    1. Key (product_id, observed_key) already in decisions with the same
        input_hash -> "duplicate": a resend; return the stored decision.
     2. Key present with a different input_hash -> "conflict": the same
        moment reported with different data; escalate as data_conflict with
@@ -338,7 +340,7 @@ def gate_node(state: PipelineState) -> dict:
     new_hash = observation_fingerprint(
         state["comp_prices"], state["comp_ratings"], state["our_rating"]
     )
-    stored = staging.find_decision(conn, state["product_id"], state["observed_at"])
+    stored = staging.find_decision(conn, state["product_id"], state["observed_key"])
     if stored is not None:
         if stored["input_hash"] == new_hash:
             return {"gate": "duplicate", "stored_decision": stored}
@@ -749,7 +751,7 @@ def persist_node(state: PipelineState) -> dict:
     """Write this run's decision, and its monthly state if priced, to the staging DB.
 
     Checked before the usual outcome logic:
-    - gate == 'conflict': the (product_id, observed_at) key is already
+    - gate == 'conflict': the (product_id, observed_key) key is already
       taken, so no new decision row is written; only opens a new
       data_conflict escalation (detail_pack is the conflict dict).
     - gate == 'held': records a 'held' decision (price/escalation_cause/
@@ -792,7 +794,7 @@ def persist_node(state: PipelineState) -> dict:
         staging.record_decision(
             conn,
             state["product_id"],
-            state["observed_at"],
+            state["observed_key"],
             "held",
             None,
             None,
@@ -816,7 +818,7 @@ def persist_node(state: PipelineState) -> dict:
     staging.record_decision(
         conn,
         state["product_id"],
-        state["observed_at"],
+        state["observed_key"],
         outcome,
         state.get("price"),
         state.get("escalation_cause"),
