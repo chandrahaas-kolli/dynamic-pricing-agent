@@ -22,6 +22,8 @@ class PipelineState(TypedDict):
 
     # --- optional: present only on some paths ---
     observed_date: NotRequired[datetime]
+    # canonical ISO 8601 UTC key set by validate_input_node; observed_at stays the raw caller string
+    observed_key: NotRequired[str]
     comp_details: NotRequired[list[CompEntry]]
     anchor: NotRequired[float]
     tier: NotRequired[str]

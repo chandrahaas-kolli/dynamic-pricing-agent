@@ -1,12 +1,9 @@
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, date, datetime
 from math import ceil, log
 
 from dateutil.relativedelta import relativedelta
-
-OBSERVED_AT_FORMAT = "%d-%m-%Y %H:%M"
-LAST_OBSERVED_FORMAT = "%d-%m-%Y"
 
 
 def validate_prices(product_id, comp_prices):
@@ -67,45 +64,93 @@ def validate_our_rating(product_id, our_rating):
 
 
 def validate_observed_at(product_id, observed_at):
-    """Check observed_at is a parseable timestamp in DD-MM-YYYY HH:MM format. Raises ValueError if not."""
+    """Check observed_at is a parseable ISO 8601 timestamp with a timezone,
+    at whole-second precision (no microseconds).
+
+    Raises TypeError if not a string; ValueError if unparseable, naive (no
+    timezone), or carrying microseconds. Returns the parsed datetime
+    converted to UTC.
+    """
+    if not isinstance(observed_at, str):
+        raise TypeError(
+            f"Invalid observed_at type for {product_id}: {observed_at!r}, must be a string"
+        )
     try:
-        return datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
+        parsed = datetime.fromisoformat(observed_at)
     except ValueError as err:
         raise ValueError(
-            f"Invalid observed_at for {product_id}: {observed_at!r}, expected format DD-MM-YYYY HH:MM"
+            f"Invalid observed_at for {product_id}: {observed_at!r}, "
+            f"expected an ISO 8601 timestamp with a timezone"
         ) from err
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(
+            f"Invalid observed_at for {product_id}: {observed_at!r}, must include a timezone"
+        )
+    if parsed.microsecond != 0:
+        raise ValueError(
+            f"Invalid observed_at for {product_id}: {observed_at!r}, must not include microseconds"
+        )
+    return parsed.astimezone(UTC)
+
+
+def canonical_timestamp(dt):
+    """Return dt as the canonical UTC idempotency key: "%Y-%m-%dT%H:%M:%SZ".
+
+    This string is the idempotency key; built from the parsed moment, never
+    the raw text, so every spelling of one instant maps to one key. It also
+    sorts chronologically as plain text.
+
+    Raises ValueError if dt is naive (no timezone).
+    """
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError(f"Invalid datetime: {dt!r}, must have a timezone")
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def validate_last_observed_mon_yr(product_id, last_observed_mon_yr):
-    """Check last_observed_mon_yr is a parseable date in DD-MM-YYYY format. Raises ValueError if not."""
+    """Check last_observed_mon_yr is a parseable ISO 8601 date (YYYY-MM-DD).
+
+    Raises TypeError if not a string; ValueError if unparseable. Returns the
+    parsed date.
+    """
+    if not isinstance(last_observed_mon_yr, str):
+        raise TypeError(
+            f"Invalid last_observed_mon_yr type for {product_id}: "
+            f"{last_observed_mon_yr!r}, must be a string"
+        )
     try:
-        return datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
+        return date.fromisoformat(last_observed_mon_yr)
     except ValueError as err:
         raise ValueError(
-            f"Invalid last_observed_mon_yr for {product_id}: {last_observed_mon_yr!r}, expected format DD-MM-YYYY"
+            f"Invalid last_observed_mon_yr for {product_id}: "
+            f"{last_observed_mon_yr!r}, expected format YYYY-MM-DD"
         ) from err
 
 
-def check_continuity(product_id, last_observed_mon_yr, observed_at):
-    """Check observed_at is the same month as the last observation or the next one.
+def check_continuity(product_id, last_observed, observed):
+    """Check observed is the same calendar month as last_observed or the next one.
 
-    Raises ValueError if not. Assumes observed_at (DD-MM-YYYY HH:MM) and
-    last_observed_mon_yr (DD-MM-YYYY) are already validated.
+    Raises ValueError if not. Takes the already-parsed last_observed (date,
+    from validate_last_observed_mon_yr) and observed (UTC datetime, from
+    validate_observed_at); does not parse or convert either, so the
+    comparison is in UTC.
     """
-    prev = datetime.strptime(last_observed_mon_yr, LAST_OBSERVED_FORMAT)
-    new = datetime.strptime(observed_at, OBSERVED_AT_FORMAT)
-    next_month = prev + relativedelta(months=1)
+    next_month = last_observed + relativedelta(months=1)
 
-    same_month = new.year == prev.year and new.month == prev.month
-    is_next_month = new.year == next_month.year and new.month == next_month.month
+    same_month = (
+        observed.year == last_observed.year and observed.month == last_observed.month
+    )
+    is_next_month = (
+        observed.year == next_month.year and observed.month == next_month.month
+    )
 
     if not (same_month or is_next_month):
         raise ValueError(
-            f"Invalid observed_at for {product_id}: {observed_at}, "
-            f"must be the same month as {last_observed_mon_yr} or the next one"
+            f"Invalid observed_at for {product_id}: {observed.isoformat()}, "
+            f"must be the same month as {last_observed.isoformat()} or the next one"
         )
 
-    return new
+    return observed
 
 
 def validate_input(
@@ -119,17 +164,17 @@ def validate_input(
 ):
     """Validate every raw input: competitor and previous competitor prices, competitor
     ratings, our_rating, observed_at, last_observed_mon_yr, and their continuity.
-    Raises ValueError/TypeError if any is invalid; returns the parsed observed_at.
+    Raises ValueError/TypeError if any is invalid; returns the parsed observed_at
+    (UTC datetime).
     """
     validate_prices(product_id, comp_prices)
     validate_prices(product_id, prev_comp_prices)
     validate_ratings(product_id, comp_ratings)
     validate_our_rating(product_id, our_rating)
-    validate_observed_at(product_id, observed_at)
-    validate_last_observed_mon_yr(product_id, last_observed_mon_yr)
-    parsed_date = check_continuity(product_id, last_observed_mon_yr, observed_at)
+    observed = validate_observed_at(product_id, observed_at)
+    last_observed = validate_last_observed_mon_yr(product_id, last_observed_mon_yr)
 
-    return parsed_date
+    return check_continuity(product_id, last_observed, observed)
 
 
 def observation_fingerprint(comp_prices, comp_ratings, our_rating):

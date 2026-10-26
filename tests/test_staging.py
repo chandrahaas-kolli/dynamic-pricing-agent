@@ -39,7 +39,7 @@ def test_record_decision_round_trip(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "escalated",
         None,
         "cap_exceeded",
@@ -82,7 +82,7 @@ def test_record_decision_no_brief_stores_null_and_keeps_price(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "priced",
         42.5,
         None,
@@ -102,7 +102,7 @@ def test_record_decision_duplicate_product_and_observed_at_raises(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "priced",
         42.5,
         None,
@@ -116,7 +116,7 @@ def test_record_decision_duplicate_product_and_observed_at_raises(conn):
         record_decision(
             conn,
             "g4",
-            "01-09-2018 10:00",
+            "2018-09-01T10:00:00Z",
             "priced",
             43.0,
             None,
@@ -132,7 +132,7 @@ def test_record_decision_same_product_different_observed_at_inserts_fine(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "priced",
         42.5,
         None,
@@ -145,7 +145,7 @@ def test_record_decision_same_product_different_observed_at_inserts_fine(conn):
     record_decision(
         conn,
         "g4",
-        "02-09-2018 10:00",
+        "2018-09-02T10:00:00Z",
         "priced",
         43.0,
         None,
@@ -165,7 +165,7 @@ def test_record_decision_same_date_different_time_inserts_fine(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "priced",
         42.5,
         None,
@@ -178,7 +178,7 @@ def test_record_decision_same_date_different_time_inserts_fine(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 14:30",
+        "2018-09-01T14:30:00Z",
         "priced",
         43.0,
         None,
@@ -199,7 +199,7 @@ def test_find_decision_round_trip(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "escalated",
         None,
         "cap_exceeded",
@@ -209,7 +209,7 @@ def test_find_decision_round_trip(conn):
         "a" * 64,
         SAMPLE_INPUTS,
     )
-    decision = find_decision(conn, "g4", "01-09-2018 10:00")
+    decision = find_decision(conn, "g4", "2018-09-01T10:00:00Z")
     assert decision["product_id"] == "g4"
     assert decision["outcome"] == "escalated"
     assert decision["brief"] == brief
@@ -218,14 +218,14 @@ def test_find_decision_round_trip(conn):
 
 
 def test_find_decision_missing_returns_none(conn):
-    assert find_decision(conn, "missing", "01-09-2018 10:00") is None
+    assert find_decision(conn, "missing", "2018-09-01T10:00:00Z") is None
 
 
 def test_find_decision_no_brief_returns_none(conn):
     record_decision(
         conn,
         "g4",
-        "01-09-2018 10:00",
+        "2018-09-01T10:00:00Z",
         "priced",
         42.5,
         None,
@@ -235,7 +235,7 @@ def test_find_decision_no_brief_returns_none(conn):
         "a" * 64,
         SAMPLE_INPUTS,
     )
-    decision = find_decision(conn, "g4", "01-09-2018 10:00")
+    decision = find_decision(conn, "g4", "2018-09-01T10:00:00Z")
     assert decision["brief"] is None
 
 

@@ -1,8 +1,11 @@
+from datetime import UTC, date, datetime
+
 import pytest
 
 from src.pricing import (
     apply_dominance_clamp,
     build_band,
+    canonical_timestamp,
     check_continuity,
     check_move_size,
     choose_target,
@@ -15,6 +18,7 @@ from src.pricing import (
     rating_gap,
     resolve_target_price,
     validate_input,
+    validate_last_observed_mon_yr,
     validate_observed_at,
     validate_our_rating,
     validate_prices,
@@ -117,7 +121,7 @@ def test_validate_our_rating_bool_raises_type_error():
 
 # --- validate_observed_at ---
 def test_validate_observed_at_valid():
-    result = validate_observed_at("g4", "01-08-2017 10:00")
+    result = validate_observed_at("g4", "2017-08-01T10:00:00Z")
     assert result.year == 2017 and result.month == 8
 
 
@@ -126,14 +130,15 @@ def test_validate_observed_at_bad_format():
         validate_observed_at("g4", "not-a-date")
 
 
-def test_validate_observed_at_no_time_raises():
+def test_validate_observed_at_date_only_raises():
+    # date-only parses as naive (no timezone) -- rejected like any naive timestamp
     with pytest.raises(ValueError):
-        validate_observed_at("g4", "01-09-2018")
+        validate_observed_at("g4", "2018-09-01")
 
 
 def test_validate_observed_at_invalid_time_raises():
     with pytest.raises(ValueError):
-        validate_observed_at("g4", "01-09-2018 25:00")
+        validate_observed_at("g4", "2018-09-01T25:00:00Z")
 
 
 def test_validate_observed_at_bad_format_chains_cause():
@@ -142,34 +147,102 @@ def test_validate_observed_at_bad_format_chains_cause():
     assert isinstance(exc_info.value.__cause__, ValueError)
 
 
+def test_validate_observed_at_naive_raises():
+    with pytest.raises(ValueError):
+        validate_observed_at("g4", "2018-09-01T10:00:00")
+
+
+def test_validate_observed_at_microseconds_raises():
+    with pytest.raises(ValueError):
+        validate_observed_at("g4", "2018-09-01T10:00:00.5Z")
+
+
+def test_validate_observed_at_non_string_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_observed_at("g4", 12345)
+
+
+def test_validate_observed_at_converts_to_utc():
+    result = validate_observed_at("g4", "2018-09-01T15:30:00+05:30")
+    assert result == datetime(2018, 9, 1, 10, 0, tzinfo=UTC)
+
+
+# --- canonical_timestamp ---
+def test_canonical_timestamp_equivalent_instants_same_key():
+    a = canonical_timestamp(validate_observed_at("g4", "2018-09-01T10:00:00Z"))
+    b = canonical_timestamp(validate_observed_at("g4", "2018-09-01T10:00:00+00:00"))
+    c = canonical_timestamp(validate_observed_at("g4", "2018-09-01T15:30:00+05:30"))
+    assert a == b == c == "2018-09-01T10:00:00Z"
+
+
+def test_canonical_timestamp_naive_raises():
+    with pytest.raises(ValueError):
+        canonical_timestamp(datetime(2018, 9, 1, 10, 0))
+
+
+def test_canonical_timestamp_keys_sort_chronologically():
+    early = canonical_timestamp(validate_observed_at("g4", "2018-08-01T10:00:00Z"))
+    mid = canonical_timestamp(validate_observed_at("g4", "2018-09-01T10:00:00Z"))
+    late = canonical_timestamp(validate_observed_at("g4", "2018-10-01T10:00:00Z"))
+    assert sorted([late, early, mid]) == [early, mid, late]
+
+
+# --- validate_last_observed_mon_yr ---
+def test_validate_last_observed_mon_yr_valid():
+    result = validate_last_observed_mon_yr("g4", "2026-08-01")
+    assert result == date(2026, 8, 1)
+
+
+def test_validate_last_observed_mon_yr_bad_format_raises():
+    with pytest.raises(ValueError):
+        validate_last_observed_mon_yr("g4", "not-a-date")
+
+
+def test_validate_last_observed_mon_yr_non_string_raises_type_error():
+    with pytest.raises(TypeError):
+        validate_last_observed_mon_yr("g4", 20260801)
+
+
 # --- check_continuity ---
 def test_check_continuity_same_month():
-    result = check_continuity("g4", "01-08-2026", "01-08-2026 10:00")
+    result = check_continuity(
+        "g4", date(2026, 8, 1), datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    )
     assert result.month == 8
 
 
 def test_check_continuity_next_month():
-    result = check_continuity("g4", "01-08-2026", "01-09-2026 10:00")
+    result = check_continuity(
+        "g4", date(2026, 8, 1), datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+    )
     assert result.month == 9
 
 
 def test_check_continuity_year_rollover():
-    result = check_continuity("g4", "01-12-2026", "01-01-2027 10:00")
+    result = check_continuity(
+        "g4", date(2026, 12, 1), datetime(2027, 1, 1, 10, 0, tzinfo=UTC)
+    )
     assert result.year == 2027 and result.month == 1
 
 
 def test_check_continuity_skip_rejected():
     with pytest.raises(ValueError):
-        check_continuity("g4", "01-08-2026", "01-11-2026 10:00")
+        check_continuity(
+            "g4", date(2026, 8, 1), datetime(2026, 11, 1, 10, 0, tzinfo=UTC)
+        )
 
 
 def test_check_continuity_same_month_different_year_rejected():
     with pytest.raises(ValueError):
-        check_continuity("g4", "01-08-2025", "01-08-2026 10:00")
+        check_continuity(
+            "g4", date(2025, 8, 1), datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+        )
 
 
 def test_check_continuity_across_month_boundary_with_timestamps():
-    result = check_continuity("g4", "31-08-2026", "01-09-2026 00:05")
+    result = check_continuity(
+        "g4", date(2026, 8, 31), datetime(2026, 9, 1, 0, 5, tzinfo=UTC)
+    )
     assert (
         result.year == 2026
         and result.month == 9
@@ -179,6 +252,23 @@ def test_check_continuity_across_month_boundary_with_timestamps():
     )
 
 
+def test_check_continuity_judged_in_utc_allows_next_month():
+    # 2018-10-01T02:00:00+05:00 == 2018-09-30T21:00:00Z: September, the
+    # month after last_observed's August -- allowed, even though the wall-
+    # clock date is already in October.
+    observed = validate_observed_at("g4", "2018-10-01T02:00:00+05:00")
+    result = check_continuity("g4", date(2018, 8, 1), observed)
+    assert result.year == 2018 and result.month == 9
+
+
+def test_check_continuity_judged_in_utc_rejects_month_after_next():
+    # 2018-10-01T10:00:00Z is genuinely October in UTC: two months after
+    # last_observed's August, not the next one.
+    observed = validate_observed_at("g4", "2018-10-01T10:00:00Z")
+    with pytest.raises(ValueError):
+        check_continuity("g4", date(2018, 8, 1), observed)
+
+
 # --- validate_input ---
 def test_validate_input_success():
     result = validate_input(
@@ -186,8 +276,8 @@ def test_validate_input_success():
         [105, 120, 90],
         [4.2, 4.0, 4.1],
         4.0,
-        "01-09-2026 10:00",
-        "01-08-2026",
+        "2026-09-01T10:00:00Z",
+        "2026-08-01",
         [100, 110, 95],
     )
     assert result.month == 9
@@ -200,8 +290,8 @@ def test_validate_input_bad_prices_raises():
             [105, 120],
             [4.2, 4.0, 4.1],
             4.0,
-            "01-09-2026 10:00",
-            "01-08-2026",
+            "2026-09-01T10:00:00Z",
+            "2026-08-01",
             [100, 110, 95],
         )
 
@@ -213,8 +303,8 @@ def test_validate_input_bad_continuity_raises():
             [105, 120, 90],
             [4.2, 4.0, 4.1],
             4.0,
-            "01-11-2026 10:00",
-            "01-08-2026",
+            "2026-11-01T10:00:00Z",
+            "2026-08-01",
             [100, 110, 95],
         )
 
@@ -226,8 +316,8 @@ def test_validate_input_prev_prices_contains_zero():
             [105, 120, 90],
             [4.2, 4.0, 4.1],
             4.0,
-            "01-09-2026 10:00",
-            "01-08-2026",
+            "2026-09-01T10:00:00Z",
+            "2026-08-01",
             [100, 0, 95],
         )
 
@@ -239,8 +329,8 @@ def test_validate_input_prev_prices_wrong_count():
             [105, 120, 90],
             [4.2, 4.0, 4.1],
             4.0,
-            "01-09-2026 10:00",
-            "01-08-2026",
+            "2026-09-01T10:00:00Z",
+            "2026-08-01",
             [100, 110],
         )
 
@@ -252,7 +342,7 @@ def test_validate_input_bad_last_observed_format():
             [105, 120, 90],
             [4.2, 4.0, 4.1],
             4.0,
-            "01-09-2026 10:00",
+            "2026-09-01T10:00:00Z",
             "not-a-date",
             [100, 110, 95],
         )
@@ -265,8 +355,8 @@ def test_validate_input_bad_our_rating_raises():
             [105, 120, 90],
             [4.2, 4.0, 4.1],
             7.5,
-            "01-09-2026 10:00",
-            "01-08-2026",
+            "2026-09-01T10:00:00Z",
+            "2026-08-01",
             [100, 110, 95],
         )
 
