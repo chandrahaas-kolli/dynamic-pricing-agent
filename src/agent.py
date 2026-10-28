@@ -34,7 +34,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from src import staging
-from src.config import BEDROCK_MODEL_ID, BEDROCK_REGION, STAGING_DB_PATH
+from src.config import get_settings
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
 from src.pricing import (
     apply_dominance_clamp,
@@ -73,7 +73,9 @@ def get_step_llm():
     keeps tests and CI independent of AWS.
     """
     llm = ChatBedrockConverse(
-        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+        model=get_settings().bedrock_model_id,
+        region_name=get_settings().bedrock_region,
+        temperature=0,
     )
     return llm.with_structured_output(StepDecision, include_raw=True)
 
@@ -82,7 +84,9 @@ def get_step_llm():
 def get_cap_brief_llm():
     """Return the cap-exceeded brief model, created on first use and reused afterwards."""
     llm = ChatBedrockConverse(
-        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+        model=get_settings().bedrock_model_id,
+        region_name=get_settings().bedrock_region,
+        temperature=0,
     )
     return llm.with_structured_output(CapExceededBrief, include_raw=True)
 
@@ -91,7 +95,9 @@ def get_cap_brief_llm():
 def get_market_brief_llm():
     """Return the market-move brief model, created on first use and reused afterwards."""
     llm = ChatBedrockConverse(
-        model=BEDROCK_MODEL_ID, region_name=BEDROCK_REGION, temperature=0
+        model=get_settings().bedrock_model_id,
+        region_name=get_settings().bedrock_region,
+        temperature=0,
     )
     return llm.with_structured_output(MarketMoveBrief, include_raw=True)
 
@@ -104,7 +110,7 @@ def get_connection():
     which keeps tests and CI independent of a staging.db on disk; tests
     patch this the same way they patch get_step_llm.
     """
-    conn = sqlite3.connect(STAGING_DB_PATH)
+    conn = sqlite3.connect(get_settings().staging_db_path)
     staging.init_db(conn)
     return conn
 
