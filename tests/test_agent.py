@@ -121,8 +121,8 @@ def _mock_staging_db(monkeypatch):
 # --- get_connection ---
 def test_get_connection_lazy_then_creates_all_tables(tmp_path, monkeypatch):
     db_path = str(tmp_path / "staging.db")
-    monkeypatch.setattr("src.agent.STAGING_DB_PATH", db_path)
-    get_connection.cache_clear()
+    monkeypatch.setenv("STAGING_DB_PATH", db_path)
+    get_connection.cache_clear()  # new: drop any connection cached by an earlier test
 
     assert not os.path.exists(db_path)
 
