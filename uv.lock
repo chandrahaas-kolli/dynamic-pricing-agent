@@ -305,6 +305,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "awscrt" },
+    { name = "botocore" },
     { name = "langchain-aws" },
     { name = "langchain-core" },
     { name = "langgraph" },
@@ -316,6 +317,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "boto3" },
     { name = "botocore-stubs" },
     { name = "mypy" },
     { name = "pip-audit" },
@@ -329,6 +331,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "awscrt", specifier = ">=0.37.0" },
+    { name = "botocore", specifier = ">=1.43.114" },
     { name = "langchain-aws", specifier = ">=1.7.9" },
     { name = "langchain-core", specifier = ">=1.6.10" },
     { name = "langgraph", specifier = ">=1.2.15" },
@@ -340,6 +343,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boto3", specifier = ">=1.43.114" },
     { name = "botocore-stubs", specifier = ">=1.43.115" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "pip-audit", specifier = ">=2.10.1" },

@@ -8,6 +8,7 @@ requires-python = ">=3.11,<3.12"
 # packages together
 dependencies = [
     "awscrt>=0.37.0",
+    "botocore>=1.43.114",
     "langchain-aws>=1.7.9",
     "langchain-core>=1.6.10",
     "langgraph>=1.2.15",
@@ -19,6 +20,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "boto3>=1.43.114",
     "botocore-stubs>=1.43.115",
     "mypy>=2.4.0",
     "pip-audit>=2.10.1",

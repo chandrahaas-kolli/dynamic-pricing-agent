@@ -34,7 +34,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from src import staging
-from src.config import get_settings
+from src.config import bedrock_client_config, get_settings
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
 from src.pricing import (
     apply_dominance_clamp,
@@ -76,6 +76,8 @@ def get_step_llm():
         model=get_settings().bedrock_model_id,
         region_name=get_settings().bedrock_region,
         temperature=0,
+        config=bedrock_client_config(),
+        max_tokens=get_settings().bedrock_max_tokens,
     )
     return llm.with_structured_output(StepDecision, include_raw=True)
 
@@ -87,6 +89,8 @@ def get_cap_brief_llm():
         model=get_settings().bedrock_model_id,
         region_name=get_settings().bedrock_region,
         temperature=0,
+        config=bedrock_client_config(),
+        max_tokens=get_settings().bedrock_max_tokens,
     )
     return llm.with_structured_output(CapExceededBrief, include_raw=True)
 
@@ -98,6 +102,8 @@ def get_market_brief_llm():
         model=get_settings().bedrock_model_id,
         region_name=get_settings().bedrock_region,
         temperature=0,
+        config=bedrock_client_config(),
+        max_tokens=get_settings().bedrock_max_tokens,
     )
     return llm.with_structured_output(MarketMoveBrief, include_raw=True)
 
