@@ -15,6 +15,9 @@ updates:
       include: "scope"
     groups:
       python-minor-patch:
+        # Explicit wildcard, matching the github-actions group and GitHub's examples.
+        patterns:
+          - "*"
         update-types:
           - "minor"
           - "patch"
