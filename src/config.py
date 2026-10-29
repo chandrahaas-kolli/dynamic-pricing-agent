@@ -11,6 +11,7 @@ rather than rejected.
 import os
 from functools import lru_cache
 
+from botocore.config import Config
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
         default="us.anthropic.claude-sonnet-4-6", min_length=1
     )
     staging_db_path: str = Field(default="data/staging.db", min_length=1)
+    bedrock_connect_timeout: float = Field(default=5, gt=0, le=60)
+    bedrock_read_timeout: float = Field(default=60, gt=0, le=120)
+    bedrock_max_tokens: int = Field(default=1024, ge=1, le=4096)
 
     @field_validator("staging_db_path")
     @classmethod
@@ -47,3 +51,20 @@ def get_settings():
     automatically (see conftest.py).
     """
     return Settings()
+
+
+def bedrock_client_config() -> Config:
+    """Return the botocore Config shared by every Bedrock client.
+
+    Retries are hard-coded to 1 total attempt (never a setting): our own
+    MAX_ATTEMPTS loop in agent.py's invoke_with_retries is the only retry
+    layer. If botocore retried underneath it too, the two would stack and
+    a single observation could make MAX_ATTEMPTS x botocore's own retry
+    count real requests instead of MAX_ATTEMPTS.
+    """
+    settings = get_settings()
+    return Config(
+        retries={"total_max_attempts": 1},
+        connect_timeout=settings.bedrock_connect_timeout,
+        read_timeout=settings.bedrock_read_timeout,
+    )
