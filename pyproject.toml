@@ -7,12 +7,12 @@ requires-python = ">=3.11,<3.12"
 # pyproject.toml holds minimum versions so Dependabot can upgrade coupled
 # packages together
 dependencies = [
-    "awscrt>=0.37.0",
-    "botocore>=1.43.114",
-    "langchain-aws>=1.7.9",
-    "langchain-core>=1.6.10",
-    "langgraph>=1.2.15",
-    "pandas>=3.0.6",
+    "awscrt>=0.38.0",
+    "botocore>=1.43.117",
+    "langchain-aws>=1.9.0",
+    "langchain-core>=1.7.0",
+    "langgraph>=1.2.16",
+    "pandas>=3.1.0",
     "pydantic>=2.14.1",
     "pydantic-settings>=2.16.1",
     "python-dateutil>=2.9.0.post0",
@@ -20,14 +20,14 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "boto3>=1.43.114",
-    "botocore-stubs>=1.43.115",
+    "boto3>=1.43.117",
+    "botocore-stubs>=1.43.117",
     "mypy>=2.4.0",
     "pip-audit>=2.10.1",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "ruff>=0.17.1",
+    "ruff>=0.17.2",
     "types-python-dateutil>=2.9.0.20260807",
 ]
 
