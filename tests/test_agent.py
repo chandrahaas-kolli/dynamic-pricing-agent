@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -9,6 +10,7 @@ from botocore.exceptions import ClientError, EndpointConnectionError
 from src import staging
 from src.agent import (
     _cap_brief,
+    _llm_call_rows,
     _market_brief,
     analyze_position_node,
     app,
@@ -23,6 +25,7 @@ from src.agent import (
     escalate_node,
     gate_node,
     get_connection,
+    invoke_with_retries,
     llm_step_size_node,
     no_action_node,
     pair_competitors_node,
@@ -79,6 +82,113 @@ class _FakeStepLLM:
         return self._result
 
 
+def _raw(input_tokens=None, output_tokens=None, request_id=None):
+    """A stand-in for result["raw"] (the underlying AIMessage) carrying just
+    enough usage_metadata/response_metadata for invoke_with_retries to read.
+    """
+    usage_metadata = None
+    if input_tokens is not None or output_tokens is not None:
+        usage_metadata = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    response_metadata = {}
+    if request_id is not None:
+        response_metadata = {"ResponseMetadata": {"RequestId": request_id}}
+    return SimpleNamespace(
+        usage_metadata=usage_metadata, response_metadata=response_metadata
+    )
+
+
+# --- invoke_with_retries / llm_usage ---
+def test_invoke_with_retries_ok_attempt_records_tokens_and_request_id():
+    fake = _FakeStepLLM(
+        {
+            "parsed": StepDecision(step_pct=0.02, rationale="x"),
+            "parsing_error": None,
+            "raw": _raw(input_tokens=120, output_tokens=40, request_id="req-1"),
+        }
+    )
+    parsed, errors, attempts, usage = invoke_with_retries(fake, [])
+    assert parsed is not None
+    assert usage == [
+        {
+            "attempt": 1,
+            "input_tokens": 120,
+            "output_tokens": 40,
+            "request_id": "req-1",
+            "outcome": "ok",
+        }
+    ]
+
+
+def test_invoke_with_retries_invalid_output_attempt_records_tokens_and_request_id(
+    monkeypatch,
+):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    fake = _FakeStepLLM(
+        {
+            "parsed": None,
+            "parsing_error": ValueError("bad output"),
+            "raw": _raw(input_tokens=80, output_tokens=5, request_id="req-2"),
+        }
+    )
+    _, _, _, usage = invoke_with_retries(fake, [])
+    assert usage[0] == {
+        "attempt": 1,
+        "input_tokens": 80,
+        "output_tokens": 5,
+        "request_id": "req-2",
+        "outcome": "invalid_output",
+    }
+
+
+def test_invoke_with_retries_missing_raw_gives_none_tokens_never_zero(monkeypatch):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    fake = _FakeStepLLM({"parsed": None, "parsing_error": None, "raw": None})
+    _, _, _, usage = invoke_with_retries(fake, [])
+    assert usage[0]["input_tokens"] is None
+    assert usage[0]["output_tokens"] is None
+    assert usage[0]["request_id"] is None
+
+
+def test_invoke_with_retries_raw_with_no_usage_metadata_gives_none_tokens(monkeypatch):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    fake = _FakeStepLLM({"parsed": None, "parsing_error": None, "raw": _raw()})
+    _, _, _, usage = invoke_with_retries(fake, [])
+    assert usage[0]["input_tokens"] is None
+    assert usage[0]["output_tokens"] is None
+    assert usage[0]["request_id"] is None
+
+
+def test_invoke_with_retries_throttled_attempts_produce_no_usage_record():
+    fake = _FakeStepLLM([_client_error("ThrottlingException")] * 3)
+    _, errors, attempts, usage = invoke_with_retries(fake, [])
+    assert attempts == 3
+    assert usage == []
+
+
+def test_invoke_with_retries_mixed_run_records_only_answered_attempts():
+    fake = _FakeStepLLM(
+        [
+            {
+                "parsed": None,
+                "parsing_error": None,
+                "raw": _raw(input_tokens=10, output_tokens=1, request_id="req-a"),
+            },
+            _client_error("ThrottlingException"),
+            {
+                "parsed": StepDecision(step_pct=0.02, rationale="x"),
+                "parsing_error": None,
+                "raw": _raw(input_tokens=15, output_tokens=3, request_id="req-c"),
+            },
+        ]
+    )
+    parsed, errors, attempts, usage = invoke_with_retries(fake, [])
+    assert parsed is not None
+    assert attempts == 3
+    assert [record["attempt"] for record in usage] == [1, 3]
+    assert usage[0]["outcome"] == "invalid_output"
+    assert usage[1]["outcome"] == "ok"
+
+
 # escalate_node now calls _cap_brief/_market_brief whenever needs_brief is
 # True, which would otherwise call Bedrock for real. Autouse so every test
 # in this file gets a default success, not just the ones that mention it.
@@ -133,7 +243,7 @@ def test_get_connection_lazy_then_creates_all_tables(tmp_path, monkeypatch):
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
-        assert tables == {"decisions", "monthly_state", "escalations"}
+        assert tables == {"decisions", "monthly_state", "escalations", "llm_calls"}
     finally:
         conn.close()
         get_connection.cache_clear()
@@ -142,6 +252,7 @@ def test_get_connection_lazy_then_creates_all_tables(tmp_path, monkeypatch):
 # --- gate_node ---
 def _gate_state(**overrides):
     state = {
+        "run_id": "r1",
         "product_id": "g4",
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -375,6 +486,7 @@ def test_escalate_node_competitor_move_double_trigger():
 
 def _cap_escalation_state(**overrides):
     state = {
+        "run_id": "r1",
         "escalation_cause": "cap_exceeded",
         "target_price": 40,
         "target_label": "high",
@@ -428,6 +540,43 @@ def test_escalate_node_cap_exceeded_brief_filled():
     }
     assert result["brief_errors"] == []
     assert result["brief_attempts"] == 1
+    assert result["llm_usage"] == [
+        {
+            "attempt": 1,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "ok",
+            "call": "cap_brief",
+        }
+    ]
+
+
+def test_escalate_node_cap_exceeded_brief_appends_to_existing_usage():
+    # cap_exceeded never follows a step call in practice, but escalate_node
+    # must still append to (never overwrite) whatever usage is already there.
+    prior_usage = [
+        {
+            "attempt": 1,
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "request_id": "req-0",
+            "outcome": "ok",
+            "call": "step",
+        }
+    ]
+    result = escalate_node(_cap_escalation_state(llm_usage=prior_usage))
+    assert result["llm_usage"] == [
+        prior_usage[0],
+        {
+            "attempt": 1,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "ok",
+            "call": "cap_brief",
+        },
+    ]
 
 
 def test_escalate_node_competitor_move_double_trigger_brief_filled():
@@ -459,6 +608,16 @@ def test_escalate_node_competitor_move_double_trigger_brief_filled():
     }
     assert result["brief_errors"] == []
     assert result["brief_attempts"] == 1
+    assert result["llm_usage"] == [
+        {
+            "attempt": 1,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "ok",
+            "call": "market_brief",
+        }
+    ]
 
 
 def test_escalate_node_competitor_move_single_trigger_no_brief_keys():
@@ -482,16 +641,31 @@ def test_escalate_node_competitor_move_single_trigger_no_brief_keys():
 
 
 def test_escalate_node_llm_failed_no_brief_keys():
+    prior_usage = [
+        {
+            "attempt": 1,
+            "input_tokens": 120,
+            "output_tokens": 40,
+            "request_id": "req-1",
+            "outcome": "invalid_output",
+            "call": "step",
+        }
+    ]
     state = {
         "escalation_cause": "llm_failed",
         "llm_errors": ["ThrottlingException: failure"] * 3,
         "llm_attempts": 3,
+        "llm_usage": prior_usage,
     }
     result = escalate_node(state)
     assert result["needs_brief"] is False
     assert result["brief"] is None
     assert "brief_errors" not in result
     assert "brief_attempts" not in result
+    # llm_failed never calls a brief, so escalate_node must not touch
+    # llm_usage at all -- the step call's usage passes through the state
+    # merge untouched instead of being overwritten.
+    assert "llm_usage" not in result
 
 
 def test_escalate_node_data_conflict_no_brief():
@@ -534,6 +708,17 @@ def test_escalate_node_cap_exceeded_brief_fails_detail_pack_unchanged(monkeypatc
         "band",
         "gap",
     }
+    assert result["llm_usage"] == [
+        {
+            "attempt": attempt,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "invalid_output",
+            "call": "cap_brief",
+        }
+        for attempt in (1, 2, 3)
+    ]
 
 
 # --- competitor_move_check_node ---
@@ -616,6 +801,7 @@ def test_check_move_size_node_tie_undercut_overrides_llm_to_direct():
 # --- llm_step_size_node (get_step_llm mocked; no test may call Bedrock) ---
 def _llm_state(**overrides):
     state = {
+        "run_id": "r1",
         "current_price": 90,
         "target_price": 96,
         "anchor": 92,
@@ -647,6 +833,16 @@ def test_llm_step_size_node_success(monkeypatch):
         "llm_rationale": "Room below the higher-rated competitor at 98.",
         "llm_attempts": 1,
         "llm_errors": [],
+        "llm_usage": [
+            {
+                "attempt": 1,
+                "input_tokens": None,
+                "output_tokens": None,
+                "request_id": None,
+                "outcome": "ok",
+                "call": "step",
+            }
+        ],
     }
 
 
@@ -660,6 +856,8 @@ def test_llm_step_size_node_parsing_error_escalates(monkeypatch):
     assert result["escalation_cause"] == "llm_failed"
     assert fake.call_count == 3
     assert result["llm_errors"] == ["invalid output: failed schema validation"] * 3
+    assert [record["call"] for record in result["llm_usage"]] == ["step"] * 3
+    assert [record["attempt"] for record in result["llm_usage"]] == [1, 2, 3]
 
 
 def test_llm_step_size_node_parsed_none_no_error_escalates(monkeypatch):
@@ -670,6 +868,17 @@ def test_llm_step_size_node_parsed_none_no_error_escalates(monkeypatch):
     assert result["escalation_cause"] == "llm_failed"
     assert fake.call_count == 3
     assert result["llm_errors"] == ["invalid output: no structured answer"] * 3
+    assert result["llm_usage"] == [
+        {
+            "attempt": attempt,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "invalid_output",
+            "call": "step",
+        }
+        for attempt in (1, 2, 3)
+    ]
 
 
 def test_llm_step_size_node_at_target_no_call(monkeypatch):
@@ -814,6 +1023,7 @@ def test_build_market_move_text_two_triggered():
 # --- _cap_brief (get_cap_brief_llm mocked; no test may call Bedrock) ---
 def _cap_brief_state(**overrides):
     state = {
+        "run_id": "r1",
         "current_price": 90,
         "anchor": 90,
         "target_price": 120,
@@ -844,20 +1054,30 @@ def test_cap_brief_success(monkeypatch):
         }
     )
     monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
-    brief, errors, attempts = _cap_brief(_cap_brief_state())
+    brief, errors, attempts, usage = _cap_brief(_cap_brief_state())
     assert brief == {
         "recommendation": "multi_month_path",
         "rationale": "Gradual is safer.",
     }
     assert errors == []
     assert attempts == 1
+    assert usage == [
+        {
+            "attempt": 1,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "ok",
+            "call": "cap_brief",
+        }
+    ]
 
 
 def test_cap_brief_three_failures_returns_none(monkeypatch):
     fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
     monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
     monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
-    brief, errors, attempts = _cap_brief(_cap_brief_state())
+    brief, errors, attempts, usage = _cap_brief(_cap_brief_state())
     assert brief is None
     assert errors == ["invalid output: no structured answer"] * 3
     assert attempts == 3
@@ -884,6 +1104,7 @@ def test_cap_brief_human_message_contains_months_and_target_reason(monkeypatch):
 # --- _market_brief (get_market_brief_llm mocked; no test may call Bedrock) ---
 def _market_brief_state(**overrides):
     state = {
+        "run_id": "r1",
         "comp_prices": [100, 55, 48],
         "prev_comp_prices": [74, 39.24, 50],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -918,20 +1139,30 @@ def test_market_brief_success(monkeypatch):
         }
     )
     monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
-    brief, errors, attempts = _market_brief(_market_brief_state())
+    brief, errors, attempts, usage = _market_brief(_market_brief_state())
     assert brief == {
         "likely_cause": "market_shift",
         "rationale": "Both movers rose together.",
     }
     assert errors == []
     assert attempts == 1
+    assert usage == [
+        {
+            "attempt": 1,
+            "input_tokens": None,
+            "output_tokens": None,
+            "request_id": None,
+            "outcome": "ok",
+            "call": "market_brief",
+        }
+    ]
 
 
 def test_market_brief_three_failures_returns_none(monkeypatch):
     fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
     monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
     monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
-    brief, errors, attempts = _market_brief(_market_brief_state())
+    brief, errors, attempts, usage = _market_brief(_market_brief_state())
     assert brief is None
     assert errors == ["invalid output: no structured answer"] * 3
     assert attempts == 3
@@ -961,6 +1192,7 @@ def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch
 
 # --- app.invoke, graph-level ---
 base = {
+    "run_id": "r1",
     "product_id": "g4",
     "comp_ratings": [3.9, 4, 4],
     "our_rating": 4.0,
@@ -1066,6 +1298,7 @@ def test_app_invoke_cap_exceeded_brief_fails_reason_unavailable(monkeypatch):
 # --- reason_node ---
 def _priced_state(**overrides):
     state = {
+        "run_id": "r1",
         "action": "proceed",
         "product_id": "g4",
         "price": 50,
@@ -2026,6 +2259,7 @@ def test_app_invoke_held_run_records_held_decision_and_skips_llm(
 # --- validate_input_node ---
 def test_validate_input_node_valid_state():
     state = {
+        "run_id": "r1",
         "product_id": "g4",
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -2043,6 +2277,7 @@ def test_validate_input_node_valid_state():
 
 def test_validate_input_node_bad_our_rating_raises():
     state = {
+        "run_id": "r1",
         "product_id": "g4",
         "comp_prices": [80, 40, 35],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -2052,6 +2287,65 @@ def test_validate_input_node_bad_our_rating_raises():
         "prev_comp_prices": [74, 39.24, 39.24],
     }
     with pytest.raises(ValueError):
+        validate_input_node(state)
+
+
+def test_validate_input_node_missing_run_id_raises():
+    state = {
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    with pytest.raises(KeyError):
+        validate_input_node(state)
+
+
+def test_validate_input_node_empty_run_id_raises():
+    state = {
+        "run_id": "",
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    with pytest.raises(ValueError, match="run_id"):
+        validate_input_node(state)
+
+
+def test_validate_input_node_non_str_run_id_raises():
+    state = {
+        "run_id": 12345,
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    with pytest.raises(TypeError, match="run_id"):
+        validate_input_node(state)
+
+
+def test_validate_input_node_none_run_id_raises():
+    state = {
+        "run_id": None,
+        "product_id": "g4",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "observed_at": "2018-09-01T10:00:00Z",
+        "last_observed_mon_yr": "2018-08-01",
+        "prev_comp_prices": [74, 39.24, 39.24],
+    }
+    with pytest.raises(TypeError, match="run_id"):
         validate_input_node(state)
 
 
@@ -2210,6 +2504,104 @@ def test_no_action_node_returns_empty_dict():
     assert no_action_node({"action": "none"}) == {}
 
 
+# --- _llm_call_rows ---
+def test_llm_call_rows_known_tokens_computes_cost():
+    state = {
+        "run_id": "r1",
+        "product_id": "g4",
+        "observed_key": "2018-09-01T10:00:00Z",
+        "llm_usage": [
+            {
+                "call": "step",
+                "attempt": 1,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "outcome": "ok",
+                "request_id": "req-1",
+            },
+            {
+                "call": "step",
+                "attempt": 2,
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "outcome": "invalid_output",
+                "request_id": "req-2",
+            },
+        ],
+    }
+    rows = _llm_call_rows(state, 3.00, 15.00)
+    assert rows == [
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            1,
+            1000,
+            200,
+            "ok",
+            "req-1",
+            3.00,
+            15.00,
+            pytest.approx(0.006),
+        ),
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            2,
+            500,
+            100,
+            "invalid_output",
+            "req-2",
+            3.00,
+            15.00,
+            pytest.approx(0.003),
+        ),
+    ]
+
+
+def test_llm_call_rows_none_tokens_gives_none_cost():
+    state = {
+        "run_id": "r1",
+        "product_id": "g4",
+        "observed_key": "2018-09-01T10:00:00Z",
+        "llm_usage": [
+            {
+                "call": "cap_brief",
+                "attempt": 1,
+                "input_tokens": None,
+                "output_tokens": None,
+                "outcome": "ok",
+                "request_id": None,
+            }
+        ],
+    }
+    rows = _llm_call_rows(state, 3.00, 15.00)
+    assert rows == [
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "cap_brief",
+            1,
+            None,
+            None,
+            "ok",
+            None,
+            3.00,
+            15.00,
+            None,
+        )
+    ]
+
+
+def test_llm_call_rows_no_usage_returns_empty_list():
+    state = {"run_id": "r1", "product_id": "g4", "observed_key": "2018-09-01T10:00:00Z"}
+    assert _llm_call_rows(state, 3.00, 15.00) == []
+
+
 # --- persist_node, direct ---
 def test_persist_node_rounding_branch_no_change(_mock_staging_db):
     conn = _mock_staging_db
@@ -2240,6 +2632,11 @@ def test_persist_node_rounding_branch_no_change(_mock_staging_db):
         ("g4", "2018-09"),
     ).fetchone()[0]
     assert current_price == 39.0
+
+    # The direct path makes no LLM call, so there's no llm_usage in state
+    # and nothing to write to llm_calls.
+    llm_calls_count = conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
+    assert llm_calls_count == 0
 
 
 def test_persist_node_no_anchor_or_current_price_skips_monthly_state(_mock_staging_db):
@@ -2279,6 +2676,150 @@ def test_persist_node_no_anchor_or_current_price_skips_monthly_state(_mock_stagi
         "SELECT COUNT(*) FROM monthly_state WHERE product_id = ?", ("g4",)
     ).fetchone()[0]
     assert monthly_rows == 0
+
+
+def test_persist_node_priced_path_writes_llm_calls_rows_with_cost(_mock_staging_db):
+    conn = _mock_staging_db
+    state = {
+        "run_id": "r1",
+        "product_id": "g4",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "observed_key": "2018-09-01T10:00:00Z",
+        "observed_date": datetime(2018, 9, 1, 10, 0, tzinfo=UTC),
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "price": 40.5,
+        "current_price": 39,
+        "anchor": 39,
+        "action": "proceed",
+        "reason": "Priced at 40.50.",
+        "llm_usage": [
+            {
+                "call": "step",
+                "attempt": 1,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "outcome": "invalid_output",
+                "request_id": "req-1",
+            },
+            {
+                "call": "step",
+                "attempt": 2,
+                "input_tokens": 1200,
+                "output_tokens": 180,
+                "outcome": "ok",
+                "request_id": "req-2",
+            },
+        ],
+    }
+    result = persist_node(state)
+    assert result == {}
+
+    outcome = conn.execute(
+        "SELECT outcome FROM decisions WHERE product_id = ?", ("g4",)
+    ).fetchone()[0]
+    assert outcome == "priced"
+
+    rows = conn.execute(
+        """
+        SELECT run_id, product_id, observed_at, call, attempt, input_tokens,
+               output_tokens, outcome, request_id, input_price_per_mtok,
+               output_price_per_mtok, estimated_cost_usd
+        FROM llm_calls
+        ORDER BY attempt
+        """
+    ).fetchall()
+    assert rows == [
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            1,
+            1000,
+            200,
+            "invalid_output",
+            "req-1",
+            3.00,
+            15.00,
+            pytest.approx(0.006),
+        ),
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            2,
+            1200,
+            180,
+            "ok",
+            "req-2",
+            3.00,
+            15.00,
+            pytest.approx(0.0063),
+        ),
+    ]
+
+
+def test_persist_node_llm_failed_escalation_saves_failed_attempt_rows(_mock_staging_db):
+    conn = _mock_staging_db
+    state = {
+        "run_id": "r1",
+        "product_id": "g4",
+        "observed_at": "2018-09-01T10:00:00Z",
+        "observed_key": "2018-09-01T10:00:00Z",
+        "comp_prices": [80, 40, 35],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "escalation_cause": "llm_failed",
+        "tier": "medium",
+        "reason": "Escalated (medium): step-size model failed after 3 attempts (ThrottlingException).",
+        "llm_errors": ["ThrottlingException: failure"] * 3,
+        "llm_attempts": 3,
+        "llm_usage": [
+            {
+                "call": "step",
+                "attempt": 1,
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "outcome": "invalid_output",
+                "request_id": "req-1",
+            },
+            {
+                "call": "step",
+                "attempt": 2,
+                "input_tokens": None,
+                "output_tokens": None,
+                "outcome": "invalid_output",
+                "request_id": None,
+            },
+            {
+                "call": "step",
+                "attempt": 3,
+                "input_tokens": 120,
+                "output_tokens": 15,
+                "outcome": "invalid_output",
+                "request_id": "req-3",
+            },
+        ],
+    }
+    result = persist_node(state)
+    assert result == {}
+
+    outcome = conn.execute(
+        "SELECT outcome FROM decisions WHERE product_id = ?", ("g4",)
+    ).fetchone()[0]
+    assert outcome == "escalated"
+
+    rows = conn.execute(
+        "SELECT call, attempt, outcome, estimated_cost_usd FROM llm_calls ORDER BY attempt"
+    ).fetchall()
+    assert rows == [
+        ("step", 1, "invalid_output", pytest.approx(0.00045)),
+        ("step", 2, "invalid_output", None),
+        ("step", 3, "invalid_output", pytest.approx(0.000585)),
+    ]
 
 
 # --- route_comp_move_check ---

@@ -22,12 +22,16 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     bedrock_region: str = Field(default="us-east-1", pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
     bedrock_model_id: str = Field(
-        default="us.anthropic.claude-sonnet-4-6", min_length=1
+        default="global.anthropic.claude-sonnet-4-6", min_length=1
     )
     staging_db_path: str = Field(default="data/staging.db", min_length=1)
     bedrock_connect_timeout: float = Field(default=5, gt=0, le=60)
     bedrock_read_timeout: float = Field(default=60, gt=0, le=120)
     bedrock_max_tokens: int = Field(default=1024, ge=1, le=4096)
+    # Bedrock on-demand list price for the global cross-region profile, in USD
+    # per 1M tokens; used only for estimated cost, not billing truth.
+    bedrock_input_price_per_mtok: float = Field(default=3.00, gt=0)
+    bedrock_output_price_per_mtok: float = Field(default=15.00, gt=0)
 
     @field_validator("staging_db_path")
     @classmethod

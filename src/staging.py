@@ -1,6 +1,6 @@
 """SQLite persistence for the pricing agent: decision history, per-product
-monthly state, and open escalations. All SQL for the staging layer lives
-here; callers never write SQL directly.
+monthly state, open escalations, and per-attempt LLM call usage/cost. All
+SQL for the staging layer lives here; callers never write SQL directly.
 
 Every function takes an open sqlite3 connection and never opens one itself,
 so callers control the connection's lifetime (and can point it at a real
@@ -48,13 +48,108 @@ CREATE_ESCALATIONS = """
     )
 """
 
+# One row per LLM attempt that got an answer (invoke_with_retries' llm_usage
+# records); an attempt that raised (ClientError/timeout) is never recorded.
+# input_tokens/output_tokens/estimated_cost_usd are nullable -- meaning
+# "unknown", never 0. Prices are stored per row, not looked up from current
+# settings, so a later price change never rewrites the cost of past rows.
+CREATE_LLM_CALLS = """
+    CREATE TABLE IF NOT EXISTS llm_calls (
+        id                     INTEGER PRIMARY KEY,
+        run_id                 TEXT    NOT NULL,
+        product_id             TEXT    NOT NULL,
+        observed_at            TEXT    NOT NULL,
+        call                   TEXT    NOT NULL,
+        attempt                INTEGER NOT NULL,
+        input_tokens           INTEGER,
+        output_tokens          INTEGER,
+        outcome                TEXT    NOT NULL,
+        request_id             TEXT,
+        input_price_per_mtok   REAL    NOT NULL,
+        output_price_per_mtok  REAL    NOT NULL,
+        estimated_cost_usd     REAL,
+        created_at             TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+"""
+
 
 def init_db(conn):
-    """Create the decisions, monthly_state and escalations tables if they don't already exist."""
+    """Create the decisions, monthly_state, escalations and llm_calls tables if they don't already exist."""
     with conn:
         conn.execute(CREATE_DECISIONS)
         conn.execute(CREATE_MONTHLY_STATE)
         conn.execute(CREATE_ESCALATIONS)
+        conn.execute(CREATE_LLM_CALLS)
+
+
+def record_llm_calls(conn, rows):
+    """Insert rows into llm_calls, one per answered LLM attempt.
+
+    Each row is a tuple in this column order: run_id, product_id,
+    observed_at, call, attempt, input_tokens, output_tokens, outcome,
+    request_id, input_price_per_mtok, output_price_per_mtok,
+    estimated_cost_usd. id and created_at are filled by SQLite. None for
+    input_tokens, output_tokens or estimated_cost_usd means unknown, never 0.
+
+    rows is empty when no LLM call was made (e.g. the direct path): this
+    returns without touching the DB. Otherwise all rows insert in one
+    transaction, so a row that violates a NOT NULL constraint rolls back
+    the whole batch instead of leaving a partial write.
+    """
+    if not rows:
+        return
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO llm_calls
+                (run_id, product_id, observed_at, call, attempt, input_tokens,
+                 output_tokens, outcome, request_id, input_price_per_mtok,
+                 output_price_per_mtok, estimated_cost_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
+def run_cost(conn, run_id):
+    """Return this run's total LLM cost: {"estimated_cost_usd": float, "unknown_cost_calls": int}.
+
+    estimated_cost_usd is the sum, over every llm_calls row for run_id, of
+    estimated_cost_usd (an estimate at list price, not billing truth).
+    unknown_cost_calls is the count of those rows whose cost is NULL
+    (unknown, from a missing token count -- never 0). A run with no rows
+    returns 0.0 and 0.
+    """
+    # SQL SUM skips NULL costs silently, so it alone would under-report the
+    # true total without saying so; count the NULL rows separately instead
+    # of hiding them.
+    cursor = conn.execute(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0.0), "
+        "COUNT(*) - COUNT(estimated_cost_usd) "
+        "FROM llm_calls WHERE run_id = ?",
+        (run_id,),
+    )
+    row = cursor.fetchone()
+    return {"estimated_cost_usd": row[0], "unknown_cost_calls": row[1]}
+
+
+def decision_cost(conn, run_id, product_id, observed_at):
+    """Return one observation's LLM cost: {"estimated_cost_usd": float, "unknown_cost_calls": int}.
+
+    Same as run_cost, but filtered to the llm_calls rows for this exact
+    run_id/product_id/observed_at -- one observation's attempts across
+    every call it made, not the whole run.
+    """
+    # Same NULL handling as run_cost: SUM skips NULL costs silently, so
+    # unknown_cost_calls counts those rows instead of letting them vanish.
+    cursor = conn.execute(
+        "SELECT COALESCE(SUM(estimated_cost_usd), 0.0), "
+        "COUNT(*) - COUNT(estimated_cost_usd) "
+        "FROM llm_calls WHERE run_id = ? AND product_id = ? AND observed_at = ?",
+        (run_id, product_id, observed_at),
+    )
+    row = cursor.fetchone()
+    return {"estimated_cost_usd": row[0], "unknown_cost_calls": row[1]}
 
 
 def record_decision(
