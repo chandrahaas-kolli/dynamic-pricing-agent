@@ -4,13 +4,16 @@ import sqlite3
 import pytest
 
 from src.staging import (
+    decision_cost,
     find_decision,
     get_monthly_state,
     has_open_escalation,
     init_db,
     open_escalation,
     record_decision,
+    record_llm_calls,
     resolve_escalation,
+    run_cost,
     upsert_monthly_state,
 )
 
@@ -32,6 +35,283 @@ SAMPLE_INPUTS = {
 
 def test_init_db_twice_raises_nothing(conn):
     init_db(conn)
+
+
+def test_init_db_creates_llm_calls_with_expected_columns(conn):
+    columns = [
+        (row[1], row[2], row[3]) for row in conn.execute("PRAGMA table_info(llm_calls)")
+    ]
+    assert columns == [
+        ("id", "INTEGER", 0),
+        ("run_id", "TEXT", 1),
+        ("product_id", "TEXT", 1),
+        ("observed_at", "TEXT", 1),
+        ("call", "TEXT", 1),
+        ("attempt", "INTEGER", 1),
+        ("input_tokens", "INTEGER", 0),
+        ("output_tokens", "INTEGER", 0),
+        ("outcome", "TEXT", 1),
+        ("request_id", "TEXT", 0),
+        ("input_price_per_mtok", "REAL", 1),
+        ("output_price_per_mtok", "REAL", 1),
+        ("estimated_cost_usd", "REAL", 0),
+        ("created_at", "TEXT", 1),
+    ]
+
+
+def test_record_llm_calls_round_trip(conn):
+    rows = [
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            1,
+            100,
+            20,
+            "ok",
+            "req-1",
+            3.0,
+            15.0,
+            0.0006,
+        ),
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            2,
+            None,
+            None,
+            "invalid_output",
+            None,
+            3.0,
+            15.0,
+            None,
+        ),
+    ]
+    record_llm_calls(conn, rows)
+    fetched = conn.execute(
+        """
+        SELECT run_id, product_id, observed_at, call, attempt, input_tokens,
+               output_tokens, outcome, request_id, input_price_per_mtok,
+               output_price_per_mtok, estimated_cost_usd
+        FROM llm_calls
+        ORDER BY attempt
+        """
+    ).fetchall()
+    assert fetched == rows
+
+
+def test_record_llm_calls_empty_list_inserts_nothing(conn):
+    record_llm_calls(conn, [])
+    count = conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
+    assert count == 0
+
+
+def test_record_llm_calls_not_null_violation_raises_and_inserts_nothing(conn):
+    rows = [
+        (
+            "r1",
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            1,
+            100,
+            20,
+            "ok",
+            "req-1",
+            3.0,
+            15.0,
+            0.0006,
+        ),
+        (
+            None,
+            "g4",
+            "2018-09-01T10:00:00Z",
+            "step",
+            2,
+            None,
+            None,
+            "ok",
+            None,
+            3.0,
+            15.0,
+            None,
+        ),
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        record_llm_calls(conn, rows)
+    count = conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0]
+    assert count == 0
+
+
+def test_run_cost_sums_only_its_own_run(conn):
+    record_llm_calls(
+        conn,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                0.006,
+            ),
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                2,
+                500,
+                100,
+                "ok",
+                "req-2",
+                3.0,
+                15.0,
+                0.003,
+            ),
+            (
+                "r2",
+                "g5",
+                "2018-09-02T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-3",
+                3.0,
+                15.0,
+                999.0,
+            ),
+        ],
+    )
+    assert run_cost(conn, "r1") == {
+        "estimated_cost_usd": pytest.approx(0.009),
+        "unknown_cost_calls": 0,
+    }
+
+
+def test_run_cost_counts_null_cost_rows_separately_from_the_sum(conn):
+    record_llm_calls(
+        conn,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                0.006,
+            ),
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                2,
+                None,
+                None,
+                "invalid_output",
+                None,
+                3.0,
+                15.0,
+                None,
+            ),
+        ],
+    )
+    assert run_cost(conn, "r1") == {
+        "estimated_cost_usd": pytest.approx(0.006),
+        "unknown_cost_calls": 1,
+    }
+
+
+def test_run_cost_empty_run_returns_zero_float_and_zero_count(conn):
+    result = run_cost(conn, "missing-run")
+    assert result == {"estimated_cost_usd": 0.0, "unknown_cost_calls": 0}
+    assert isinstance(result["estimated_cost_usd"], float)
+
+
+def test_decision_cost_filters_to_one_product_and_observation_within_a_run(conn):
+    record_llm_calls(
+        conn,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                0.006,
+            ),
+            (
+                "r1",
+                "g4",
+                "2018-09-02T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-2",
+                3.0,
+                15.0,
+                0.009,
+            ),
+            (
+                "r1",
+                "g5",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-3",
+                3.0,
+                15.0,
+                0.012,
+            ),
+            (
+                "r2",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-4",
+                3.0,
+                15.0,
+                0.015,
+            ),
+        ],
+    )
+    assert decision_cost(conn, "r1", "g4", "2018-09-01T10:00:00Z") == {
+        "estimated_cost_usd": pytest.approx(0.006),
+        "unknown_cost_calls": 0,
+    }
 
 
 def test_record_decision_round_trip(conn):

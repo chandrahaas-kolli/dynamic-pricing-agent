@@ -16,16 +16,20 @@ def _isolate_env(monkeypatch):
     monkeypatch.delenv("BEDROCK_CONNECT_TIMEOUT", raising=False)
     monkeypatch.delenv("BEDROCK_READ_TIMEOUT", raising=False)
     monkeypatch.delenv("BEDROCK_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("BEDROCK_INPUT_PRICE_PER_MTOK", raising=False)
+    monkeypatch.delenv("BEDROCK_OUTPUT_PRICE_PER_MTOK", raising=False)
 
 
 def test_defaults_load():
     settings = Settings(_env_file=None)
     assert settings.bedrock_region == "us-east-1"
-    assert settings.bedrock_model_id == "us.anthropic.claude-sonnet-4-6"
+    assert settings.bedrock_model_id == "global.anthropic.claude-sonnet-4-6"
     assert settings.staging_db_path == "data/staging.db"
     assert settings.bedrock_connect_timeout == 5
     assert settings.bedrock_read_timeout == 60
     assert settings.bedrock_max_tokens == 1024
+    assert settings.bedrock_input_price_per_mtok == 3.00
+    assert settings.bedrock_output_price_per_mtok == 15.00
 
 
 def test_invalid_bedrock_region_raises(monkeypatch):
@@ -101,6 +105,34 @@ def test_bedrock_timeout_and_max_tokens_env_overrides(
 def test_bedrock_timeout_and_max_tokens_reject_out_of_range(
     monkeypatch, env_var, value
 ):
+    monkeypatch.setenv(env_var, value)
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("env_var", "value", "expected"),
+    [
+        ("BEDROCK_INPUT_PRICE_PER_MTOK", "5.5", 5.5),
+        ("BEDROCK_OUTPUT_PRICE_PER_MTOK", "20", 20.0),
+    ],
+)
+def test_bedrock_price_env_overrides(monkeypatch, env_var, value, expected):
+    monkeypatch.setenv(env_var, value)
+    settings = Settings(_env_file=None)
+    assert getattr(settings, env_var.lower()) == expected
+
+
+@pytest.mark.parametrize(
+    ("env_var", "value"),
+    [
+        ("BEDROCK_INPUT_PRICE_PER_MTOK", "0"),
+        ("BEDROCK_INPUT_PRICE_PER_MTOK", "-1"),
+        ("BEDROCK_OUTPUT_PRICE_PER_MTOK", "0"),
+        ("BEDROCK_OUTPUT_PRICE_PER_MTOK", "-1"),
+    ],
+)
+def test_bedrock_price_rejects_zero_and_negative(monkeypatch, env_var, value):
     monkeypatch.setenv(env_var, value)
     with pytest.raises(pydantic.ValidationError):
         Settings(_env_file=None)

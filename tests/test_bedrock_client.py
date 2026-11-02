@@ -96,7 +96,7 @@ def test_bedrock_client_config_sends_exactly_one_request_per_invoke(throttling_s
 
     with pytest.raises(ClientError) as exc_info:
         client.converse(
-            modelId="us.anthropic.claude-sonnet-4-6",
+            modelId="global.anthropic.claude-sonnet-4-6",
             messages=[{"role": "user", "content": [{"text": "hi"}]}],
         )
 
@@ -119,7 +119,7 @@ def test_invoke_with_retries_sends_exactly_max_attempts_requests(
         endpoint_url=throttling_stub,
     ).with_structured_output(StepDecision, include_raw=True)
 
-    parsed, llm_errors, attempts = invoke_with_retries(
+    parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
         llm, [SystemMessage(content="sys"), HumanMessage(content="hi")]
     )
 
@@ -127,6 +127,9 @@ def test_invoke_with_retries_sends_exactly_max_attempts_requests(
     assert attempts == MAX_ATTEMPTS
     assert llm_errors == ["ThrottlingException: throttled"] * MAX_ATTEMPTS
     assert _ThrottlingHandler.request_count == MAX_ATTEMPTS
+    # Every attempt here raised ClientError (throttled) -- none got an
+    # answer to measure, so no usage record is ever added for them.
+    assert llm_usage == []
 
 
 # --- c: every factory applies the shared config and the max_tokens setting ---

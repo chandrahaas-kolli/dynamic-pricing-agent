@@ -35,6 +35,7 @@ from langgraph.graph import END, START, StateGraph
 
 from src import staging
 from src.config import bedrock_client_config, get_settings
+from src.cost import estimate_cost_usd
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
 from src.pricing import (
     apply_dominance_clamp,
@@ -201,6 +202,20 @@ RETRYABLE_CODES = {
 }
 
 
+def _extract_usage(raw):
+    """Return (input_tokens, output_tokens, request_id) from a raw AIMessage.
+
+    Each is None when raw itself, usage_metadata, or the nested RequestId is
+    missing -- never 0, since 0 would claim a known value.
+    """
+    usage = getattr(raw, "usage_metadata", None)
+    input_tokens = usage.get("input_tokens") if usage else None
+    output_tokens = usage.get("output_tokens") if usage else None
+    response_metadata = getattr(raw, "response_metadata", None) or {}
+    request_id = response_metadata.get("ResponseMetadata", {}).get("RequestId")
+    return input_tokens, output_tokens, request_id
+
+
 def invoke_with_retries(llm, messages):
     """Call llm.invoke(messages) with retries, schema-agnostic (reusable by escalation briefs).
 
@@ -210,21 +225,42 @@ def invoke_with_retries(llm, messages):
     (BACKOFF_SECONDS) between attempts except after the last one. A
     non-retryable ClientError code stops immediately instead of retrying.
 
-    Returns (parsed, llm_errors, attempts):
-    - success: (result["parsed"], llm_errors so far, attempt + 1)
-    - failure: (None, llm_errors, len(llm_errors))
+    Every attempt that gets an answer (success, a schema failure, or a
+    missing parsed result) adds one record to llm_usage before the error is
+    recorded or the result is returned: attempt (1-based), input_tokens and
+    output_tokens and request_id from the raw response (see _extract_usage),
+    and outcome ("ok" or "invalid_output"). A ClientError or connection/
+    timeout attempt adds no record -- there was no answer to measure.
+    Records don't carry "call": only the caller knows which prompt it sent.
+
+    Returns (parsed, llm_errors, attempts, llm_usage):
+    - success: (result["parsed"], llm_errors so far, attempt + 1, llm_usage)
+    - failure: (None, llm_errors, len(llm_errors), llm_usage)
     """
     llm_errors = []
+    llm_usage = []
+
     for attempt in range(MAX_ATTEMPTS):
         try:
             result = llm.invoke(messages)
+            raw = result.get("raw")
+            input_tokens, output_tokens, request_id = _extract_usage(raw)
+            record = {
+                "attempt": attempt + 1,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "request_id": request_id,
+            }
             # parsed can also be None with no error if the model skipped the schema entirely.
             if result["parsing_error"] is not None:
+                llm_usage.append({**record, "outcome": "invalid_output"})
                 llm_errors.append("invalid output: failed schema validation")
             elif result["parsed"] is None:
+                llm_usage.append({**record, "outcome": "invalid_output"})
                 llm_errors.append("invalid output: no structured answer")
             else:
-                return result["parsed"], llm_errors, attempt + 1
+                llm_usage.append({**record, "outcome": "ok"})
+                return result["parsed"], llm_errors, attempt + 1, llm_usage
         except ClientError as e:
             code = e.response["Error"]["Code"]
             message = e.response["Error"]["Message"]
@@ -237,7 +273,7 @@ def invoke_with_retries(llm, messages):
         if attempt < MAX_ATTEMPTS - 1:
             time.sleep(BACKOFF_SECONDS[attempt])
 
-    return None, llm_errors, len(llm_errors)
+    return None, llm_errors, len(llm_errors), llm_usage
 
 
 def _cap_brief(state):
@@ -248,8 +284,9 @@ def _cap_brief(state):
     (months_to_reach), and delegates the call (with retries) to
     invoke_with_retries.
 
-    Returns (brief, llm_errors, attempts): brief is parsed.model_dump() on
-    success or None on failure. Never raises on a failed brief; the caller
+    Returns (brief, llm_errors, attempts, llm_usage): brief is
+    parsed.model_dump() on success or None on failure. Each llm_usage record
+    is tagged call="cap_brief". Never raises on a failed brief; the caller
     decides what a missing brief means.
     """
     human_text = CAP_BRIEF_HUMAN_TEMPLATE.format(
@@ -272,9 +309,17 @@ def _cap_brief(state):
         HumanMessage(content=human_text),
     ]
 
-    parsed, llm_errors, attempts = invoke_with_retries(get_cap_brief_llm(), messages)
+    parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
+        get_cap_brief_llm(), messages
+    )
+    llm_usage = [{**record, "call": "cap_brief"} for record in llm_usage]
 
-    return (parsed.model_dump() if parsed is not None else None), llm_errors, attempts
+    return (
+        (parsed.model_dump() if parsed is not None else None),
+        llm_errors,
+        attempts,
+        llm_usage,
+    )
 
 
 def _market_brief(state):
@@ -285,9 +330,10 @@ def _market_brief(state):
     (build_market_move_text), and delegates the call (with retries) to
     invoke_with_retries.
 
-    Returns (brief, llm_errors, attempts): brief is parsed.model_dump() on
-    success or None on failure. Never raises on a failed brief; the caller
-    decides what a missing brief means.
+    Returns (brief, llm_errors, attempts, llm_usage): brief is
+    parsed.model_dump() on success or None on failure. Each llm_usage record
+    is tagged call="market_brief". Never raises on a failed brief; the
+    caller decides what a missing brief means.
     """
     human_text = MARKET_BRIEF_HUMAN_TEMPLATE.format(
         triggered_count=len(state["triggered"]),
@@ -305,9 +351,17 @@ def _market_brief(state):
         HumanMessage(content=human_text),
     ]
 
-    parsed, llm_errors, attempts = invoke_with_retries(get_market_brief_llm(), messages)
+    parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
+        get_market_brief_llm(), messages
+    )
+    llm_usage = [{**record, "call": "market_brief"} for record in llm_usage]
 
-    return (parsed.model_dump() if parsed is not None else None), llm_errors, attempts
+    return (
+        (parsed.model_dump() if parsed is not None else None),
+        llm_errors,
+        attempts,
+        llm_usage,
+    )
 
 
 # ---------- Nodes ----------
@@ -319,8 +373,20 @@ def validate_input_node(state: PipelineState) -> dict:
     """Validate inputs; store the parsed UTC datetime in observed_date and
     its canonical ISO 8601 UTC string (the idempotency key) in observed_key.
 
-    observed_at is left untouched (the raw caller string).
+    observed_at is left untouched (the raw caller string). run_id is
+    checked here (non-empty string) rather than in pricing.py, since it
+    identifies the run, not an observation; no node ever sets or changes it.
     """
+    run_id = state["run_id"]
+    if not isinstance(run_id, str):
+        raise TypeError(
+            f"Invalid run_id for {state['product_id']}: {run_id!r}, must be a string"
+        )
+    if run_id == "":
+        raise ValueError(
+            f"Invalid run_id for {state['product_id']}: {run_id!r}, must not be empty"
+        )
+
     parsed = validate_input(
         state["product_id"],
         state["comp_prices"],
@@ -467,7 +533,9 @@ def llm_step_size_node(state: PipelineState) -> dict:
     data (STEP_SIZE_HUMAN_TEMPLATE) to the model and stores the validated
     StepDecision as llm_step_pct and llm_rationale, along with llm_attempts
     and llm_errors from any failed attempts before the eventual success
-    (empty on a first-try success).
+    (empty on a first-try success). llm_usage (each record tagged
+    call="step") is set on both the success and failure paths below; on
+    this no-call shortcut it is omitted entirely, since no attempt was made.
 
     If the price is already at the target, no call is made. Otherwise the
     call (with retries) is delegated to invoke_with_retries; see its
@@ -475,7 +543,7 @@ def llm_step_size_node(state: PipelineState) -> dict:
 
     If every attempt fails, returns escalate=True, tier='medium',
     escalation_cause='llm_failed', llm_errors (one message per failed
-    attempt) and llm_attempts, instead of raising.
+    attempt), llm_attempts and llm_usage, instead of raising.
     """
     current_price = state["current_price"]
     target_price = state["target_price"]
@@ -500,7 +568,10 @@ def llm_step_size_node(state: PipelineState) -> dict:
         HumanMessage(content=human_text),
     ]
 
-    parsed, llm_errors, attempts = invoke_with_retries(get_step_llm(), messages)
+    parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
+        get_step_llm(), messages
+    )
+    llm_usage = [{**record, "call": "step"} for record in llm_usage]
 
     if parsed is None:
         return {
@@ -509,6 +580,7 @@ def llm_step_size_node(state: PipelineState) -> dict:
             "escalation_cause": "llm_failed",
             "llm_errors": llm_errors,
             "llm_attempts": attempts,
+            "llm_usage": llm_usage,
         }
 
     return {
@@ -516,6 +588,7 @@ def llm_step_size_node(state: PipelineState) -> dict:
         "llm_rationale": parsed.rationale,
         "llm_attempts": attempts,
         "llm_errors": llm_errors,
+        "llm_usage": llm_usage,
     }
 
 
@@ -586,6 +659,12 @@ def escalate_node(state: PipelineState) -> dict:
     to the result; a failed brief (brief None) never raises and never
     changes detail_pack. When needs_brief is False, brief stays None and
     brief_errors/brief_attempts are omitted entirely.
+
+    The brief call's llm_usage is appended to any usage already in state
+    (never overwritten) and returned under "llm_usage"; on the llm_failed
+    path (no brief call), "llm_usage" is left out of the result entirely so
+    the usage llm_step_size_node already recorded for the step call passes
+    through the merge untouched.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -622,12 +701,13 @@ def escalate_node(state: PipelineState) -> dict:
     result = {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
     if needs_brief:
         if cause == "cap_exceeded":
-            brief, errors, attempts = _cap_brief(state)
+            brief, errors, attempts, usage = _cap_brief(state)
         elif cause == "competitor_move":
-            brief, errors, attempts = _market_brief(state)
+            brief, errors, attempts, usage = _market_brief(state)
         else:
             raise ValueError(f"unexpected escalation_cause needing a brief: {cause}")
         result.update(brief=brief, brief_errors=errors, brief_attempts=attempts)
+        result["llm_usage"] = state.get("llm_usage", []) + usage
     return result
 
 
@@ -759,6 +839,46 @@ def reason_node(state: PipelineState) -> dict:
     return {"reason": text}
 
 
+def _llm_call_rows(state, input_price, output_price) -> list[tuple]:
+    """Build one llm_calls row (staging.record_llm_calls' tuple order) per
+    llm_usage record in state: run_id, product_id, observed_key, call,
+    attempt, input_tokens, output_tokens, outcome, request_id, input_price,
+    output_price, cost.
+
+    cost is None when either token count is None (unknown stays unknown,
+    never priced as 0). Pure: input_price/output_price are passed in, never
+    read from settings, so this has no AWS/env dependency of its own.
+    """
+    rows = []
+    for record in state.get("llm_usage", []):
+        if record["input_tokens"] is None or record["output_tokens"] is None:
+            cost = None
+        else:
+            cost = estimate_cost_usd(
+                record["input_tokens"],
+                record["output_tokens"],
+                input_price,
+                output_price,
+            )
+        rows.append(
+            (
+                state["run_id"],
+                state["product_id"],
+                state["observed_key"],
+                record["call"],
+                record["attempt"],
+                record["input_tokens"],
+                record["output_tokens"],
+                record["outcome"],
+                record["request_id"],
+                input_price,
+                output_price,
+                cost,
+            )
+        )
+    return rows
+
+
 def persist_node(state: PipelineState) -> dict:
     """Write this run's decision, and its monthly state if priced, to the staging DB.
 
@@ -785,6 +905,14 @@ def persist_node(state: PipelineState) -> dict:
     on every decision. When outcome is 'escalated', also opens a new
     escalation row for the human to resolve later (step 12), with
     detail_pack stored on it as detail.
+
+    Right after record_decision (on this main path only -- the conflict and
+    held paths above never make an LLM call, so there is no llm_usage to
+    write there), every record in state's llm_usage is written to
+    llm_calls via _llm_call_rows, priced at the current
+    bedrock_input_price_per_mtok/bedrock_output_price_per_mtok settings.
+    When llm_usage is absent or empty (no LLM call this run), this writes
+    nothing.
     """
     conn = get_connection()
     inputs = {
@@ -839,6 +967,15 @@ def persist_node(state: PipelineState) -> dict:
         state.get("brief"),
         input_hash,
         inputs,
+    )
+
+    staging.record_llm_calls(
+        conn,
+        _llm_call_rows(
+            state,
+            get_settings().bedrock_input_price_per_mtok,
+            get_settings().bedrock_output_price_per_mtok,
+        ),
     )
 
     if "anchor" in state and "current_price" in state:
