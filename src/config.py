@@ -12,7 +12,7 @@ import os
 from functools import lru_cache
 
 from botocore.config import Config
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # per 1M tokens; used only for estimated cost, not billing truth.
     bedrock_input_price_per_mtok: float = Field(default=3.00, gt=0)
     bedrock_output_price_per_mtok: float = Field(default=15.00, gt=0)
+    # Optional: tracing is on only when both keys are present and non-empty;
+    # absent or empty (the default) means tracing is off and no Langfuse
+    # client is ever created. langfuse_secret_key is a SecretStr so it never
+    # appears in a repr, log line or error message.
+    langfuse_public_key: str | None = Field(default=None)
+    langfuse_secret_key: SecretStr | None = Field(default=None)
+    langfuse_base_url: str = Field(
+        default="https://us.cloud.langfuse.com", min_length=1
+    )
 
     @field_validator("staging_db_path")
     @classmethod

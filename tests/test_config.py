@@ -18,6 +18,9 @@ def _isolate_env(monkeypatch):
     monkeypatch.delenv("BEDROCK_MAX_TOKENS", raising=False)
     monkeypatch.delenv("BEDROCK_INPUT_PRICE_PER_MTOK", raising=False)
     monkeypatch.delenv("BEDROCK_OUTPUT_PRICE_PER_MTOK", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
 
 
 def test_defaults_load():
@@ -30,6 +33,9 @@ def test_defaults_load():
     assert settings.bedrock_max_tokens == 1024
     assert settings.bedrock_input_price_per_mtok == 3.00
     assert settings.bedrock_output_price_per_mtok == 15.00
+    assert settings.langfuse_public_key is None
+    assert settings.langfuse_secret_key is None
+    assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
 
 
 def test_invalid_bedrock_region_raises(monkeypatch):
@@ -147,3 +153,24 @@ def test_bedrock_client_config_has_single_attempt_and_configured_timeouts(monkey
     assert config.retries == {"total_max_attempts": 1}
     assert config.connect_timeout == get_settings().bedrock_connect_timeout == 7
     assert config.read_timeout == get_settings().bedrock_read_timeout == 42
+
+
+def test_langfuse_env_vars_override_defaults(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-real")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-real")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://custom.langfuse.example")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.langfuse_public_key == "pk-real"
+    assert settings.langfuse_secret_key.get_secret_value() == "sk-real"
+    assert settings.langfuse_base_url == "https://custom.langfuse.example"
+
+
+def test_langfuse_secret_key_never_appears_in_repr(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-super-secret")
+    settings = Settings(_env_file=None)
+
+    assert "sk-super-secret" not in repr(settings)
+    assert "sk-super-secret" not in repr(settings.langfuse_secret_key)
+    assert "sk-super-secret" not in str(settings.langfuse_secret_key)
