@@ -37,6 +37,7 @@ from src import staging
 from src.config import bedrock_client_config, get_settings
 from src.cost import estimate_cost_usd
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
+from src.logs import log_event, logged_node
 from src.pricing import (
     apply_dominance_clamp,
     build_band,
@@ -216,7 +217,7 @@ def _extract_usage(raw):
     return input_tokens, output_tokens, request_id
 
 
-def invoke_with_retries(llm, messages):
+def invoke_with_retries(llm, messages, run_id=None, product_id=None):
     """Call llm.invoke(messages) with retries, schema-agnostic (reusable by escalation briefs).
 
     Retries up to MAX_ATTEMPTS times on: a retryable ClientError code
@@ -233,12 +234,21 @@ def invoke_with_retries(llm, messages):
     timeout attempt adds no record -- there was no answer to measure.
     Records don't carry "call": only the caller knows which prompt it sent.
 
+    Logs one "llm_retry" (WARNING) right before each backoff sleep, and one
+    "llm_failed" (ERROR) when every attempt is exhausted (or a non-retryable
+    error stops it early) -- both with the attempt number and error
+    code/type only, never the error message, prompt or output. run_id and
+    product_id are optional (default None, so existing callers keep
+    working unchanged) and are included on both lines as given, so a retry
+    or failure can be traced back to the run and product that caused it.
+
     Returns (parsed, llm_errors, attempts, llm_usage):
     - success: (result["parsed"], llm_errors so far, attempt + 1, llm_usage)
     - failure: (None, llm_errors, len(llm_errors), llm_usage)
     """
     llm_errors = []
     llm_usage = []
+    error_codes = []
 
     for attempt in range(MAX_ATTEMPTS):
         try:
@@ -255,9 +265,11 @@ def invoke_with_retries(llm, messages):
             if result["parsing_error"] is not None:
                 llm_usage.append({**record, "outcome": "invalid_output"})
                 llm_errors.append("invalid output: failed schema validation")
+                error_codes.append("invalid_output")
             elif result["parsed"] is None:
                 llm_usage.append({**record, "outcome": "invalid_output"})
                 llm_errors.append("invalid output: no structured answer")
+                error_codes.append("invalid_output")
             else:
                 llm_usage.append({**record, "outcome": "ok"})
                 return result["parsed"], llm_errors, attempt + 1, llm_usage
@@ -265,14 +277,32 @@ def invoke_with_retries(llm, messages):
             code = e.response["Error"]["Code"]
             message = e.response["Error"]["Message"]
             llm_errors.append(f"{code}: {message}")
+            error_codes.append(code)
             if code not in RETRYABLE_CODES:
                 break
         except (EndpointConnectionError, ReadTimeoutError) as e:
             llm_errors.append(type(e).__name__)
+            error_codes.append(type(e).__name__)
 
         if attempt < MAX_ATTEMPTS - 1:
+            log_event(
+                "llm_retry",
+                level="WARNING",
+                run_id=run_id,
+                product_id=product_id,
+                attempt=attempt + 1,
+                error_code=error_codes[-1],
+            )
             time.sleep(BACKOFF_SECONDS[attempt])
 
+    log_event(
+        "llm_failed",
+        level="ERROR",
+        run_id=run_id,
+        product_id=product_id,
+        attempts=len(llm_errors),
+        error_codes=error_codes,
+    )
     return None, llm_errors, len(llm_errors), llm_usage
 
 
@@ -310,7 +340,10 @@ def _cap_brief(state):
     ]
 
     parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
-        get_cap_brief_llm(), messages
+        get_cap_brief_llm(),
+        messages,
+        run_id=state["run_id"],
+        product_id=state["product_id"],
     )
     llm_usage = [{**record, "call": "cap_brief"} for record in llm_usage]
 
@@ -352,7 +385,10 @@ def _market_brief(state):
     ]
 
     parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
-        get_market_brief_llm(), messages
+        get_market_brief_llm(),
+        messages,
+        run_id=state["run_id"],
+        product_id=state["product_id"],
     )
     llm_usage = [{**record, "call": "market_brief"} for record in llm_usage]
 
@@ -569,7 +605,10 @@ def llm_step_size_node(state: PipelineState) -> dict:
     ]
 
     parsed, llm_errors, attempts, llm_usage = invoke_with_retries(
-        get_step_llm(), messages
+        get_step_llm(),
+        messages,
+        run_id=state["run_id"],
+        product_id=state["product_id"],
     )
     llm_usage = [{**record, "call": "step"} for record in llm_usage]
 
@@ -1040,21 +1079,21 @@ def route_llm_step_size(state: PipelineState) -> str:
 
 graph = StateGraph(PipelineState)
 
-graph.add_node("validate_input_node", validate_input_node)
-graph.add_node("gate_node", gate_node)
-graph.add_node("competitor_move_check_node", competitor_move_check_node)
-graph.add_node("pair_competitors_node", pair_competitors_node)
-graph.add_node("analyze_position_node", analyze_position_node)
-graph.add_node("resolve_target_price_node", resolve_target_price_node)
-graph.add_node("check_move_size_node", check_move_size_node)
-graph.add_node("llm_step_size_node", llm_step_size_node)
-graph.add_node("compute_step_node", compute_step_node)
-graph.add_node("apply_dominance_clamp_node", apply_dominance_clamp_node)
-graph.add_node("enforce_bounds_node", enforce_bounds_node)
-graph.add_node("escalate_node", escalate_node)
-graph.add_node("no_action_node", no_action_node)
-graph.add_node("reason_node", reason_node)
-graph.add_node("persist_node", persist_node)
+graph.add_node("validate_input_node", logged_node(validate_input_node))
+graph.add_node("gate_node", logged_node(gate_node))
+graph.add_node("competitor_move_check_node", logged_node(competitor_move_check_node))
+graph.add_node("pair_competitors_node", logged_node(pair_competitors_node))
+graph.add_node("analyze_position_node", logged_node(analyze_position_node))
+graph.add_node("resolve_target_price_node", logged_node(resolve_target_price_node))
+graph.add_node("check_move_size_node", logged_node(check_move_size_node))
+graph.add_node("llm_step_size_node", logged_node(llm_step_size_node))
+graph.add_node("compute_step_node", logged_node(compute_step_node))
+graph.add_node("apply_dominance_clamp_node", logged_node(apply_dominance_clamp_node))
+graph.add_node("enforce_bounds_node", logged_node(enforce_bounds_node))
+graph.add_node("escalate_node", logged_node(escalate_node))
+graph.add_node("no_action_node", logged_node(no_action_node))
+graph.add_node("reason_node", logged_node(reason_node))
+graph.add_node("persist_node", logged_node(persist_node))
 
 graph.add_edge(START, "validate_input_node")
 graph.add_edge("validate_input_node", "gate_node")

@@ -11,6 +11,7 @@ dependencies = [
     "botocore>=1.43.118",
     "langchain-aws>=1.9.0",
     "langchain-core>=1.7.0",
+    "langfuse>=5.1.0",
     "langgraph>=1.2.16",
     "pandas>=3.1.0",
     "pydantic>=2.14.1",

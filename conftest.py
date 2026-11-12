@@ -1,8 +1,11 @@
 """Root conftest: its presence makes pytest add the repo root to sys.path, so tests can import src."""
 
+import logging
+
 import pytest
 
 from src.config import get_settings
+from src.logs import LOGGER_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -11,3 +14,35 @@ def _clear_settings_cache():
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _force_tracing_off(request, monkeypatch):
+    """No test ever sends a real Langfuse trace, even on a machine whose
+    local .env has real keys: force both keys to "" (empty), which beats
+    the .env file -- pydantic-settings reads environment variables before
+    the dotenv file, so this wins regardless of what's on disk. Skipped for
+    tests marked @pytest.mark.live, which keep real settings so they can
+    exercise the real tracing path.
+    """
+    if "live" in request.keywords:
+        yield
+        return
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
+    get_settings.cache_clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_pricing_agent_logger():
+    # The "pricing_agent" logger is a module-global singleton (logging's own
+    # name registry), so without this it would carry handlers and a level
+    # from one test into the next.
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.handlers.clear()
+    logger.setLevel(logging.NOTSET)
+    logger.propagate = False
+    yield
+    logger.handlers.clear()
+    logger.setLevel(logging.NOTSET)
