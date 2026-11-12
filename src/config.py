@@ -10,6 +10,7 @@ rather than rejected.
 
 import os
 from functools import lru_cache
+from typing import Literal
 
 from botocore.config import Config
 from pydantic import Field, SecretStr, field_validator
@@ -41,6 +42,8 @@ class Settings(BaseSettings):
     langfuse_base_url: str = Field(
         default="https://us.cloud.langfuse.com", min_length=1
     )
+    # Passed to Langfuse as the trace environment (see src/tracing.py).
+    app_env: Literal["dev", "prod"] = Field(default="dev")
 
     @field_validator("staging_db_path")
     @classmethod

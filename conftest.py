@@ -1,8 +1,11 @@
 """Root conftest: its presence makes pytest add the repo root to sys.path, so tests can import src."""
 
+import logging
+
 import pytest
 
 from src.config import get_settings
+from src.logs import LOGGER_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -29,3 +32,17 @@ def _force_tracing_off(request, monkeypatch):
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")
     get_settings.cache_clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_pricing_agent_logger():
+    # The "pricing_agent" logger is a module-global singleton (logging's own
+    # name registry), so without this it would carry handlers and a level
+    # from one test into the next.
+    logger = logging.getLogger(LOGGER_NAME)
+    logger.handlers.clear()
+    logger.setLevel(logging.NOTSET)
+    logger.propagate = False
+    yield
+    logger.handlers.clear()
+    logger.setLevel(logging.NOTSET)

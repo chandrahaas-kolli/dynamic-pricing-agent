@@ -21,6 +21,7 @@ def _isolate_env(monkeypatch):
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.delenv("APP_ENV", raising=False)
 
 
 def test_defaults_load():
@@ -36,6 +37,7 @@ def test_defaults_load():
     assert settings.langfuse_public_key is None
     assert settings.langfuse_secret_key is None
     assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
+    assert settings.app_env == "dev"
 
 
 def test_invalid_bedrock_region_raises(monkeypatch):
@@ -174,3 +176,15 @@ def test_langfuse_secret_key_never_appears_in_repr(monkeypatch):
     assert "sk-super-secret" not in repr(settings)
     assert "sk-super-secret" not in repr(settings.langfuse_secret_key)
     assert "sk-super-secret" not in str(settings.langfuse_secret_key)
+
+
+def test_app_env_accepts_prod(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    settings = Settings(_env_file=None)
+    assert settings.app_env == "prod"
+
+
+def test_app_env_rejects_unknown_value(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "staging")
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)

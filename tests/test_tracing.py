@@ -23,10 +23,13 @@ class _FakeHandler:
 
 
 class _FakeLangfuseClient:
-    def __init__(self, *, public_key=None, secret_key=None, base_url=None):
+    def __init__(
+        self, *, public_key=None, secret_key=None, base_url=None, environment=None
+    ):
         self.public_key = public_key
         self.secret_key = secret_key
         self.base_url = base_url
+        self.environment = environment
         self.shutdown_calls = 0
 
     def shutdown(self):
@@ -92,7 +95,11 @@ def test_get_trace_config_on_returns_one_callback_handler_and_metadata(monkeypat
 
     config = get_trace_config("run-1", "g4")
 
-    assert config["metadata"] == {"run_id": "run-1", "product_id": "g4"}
+    assert config["metadata"] == {
+        "run_id": "run-1",
+        "product_id": "g4",
+        "langfuse_session_id": "run-1",
+    }
     assert len(config["callbacks"]) == 1
     assert isinstance(config["callbacks"][0], _FakeHandler)
     assert config["callbacks"][0].public_key == "pk-real"
@@ -104,6 +111,7 @@ def test_get_langfuse_client_builds_from_settings_only(monkeypatch):
         langfuse_public_key="pk-real",
         langfuse_secret_key="sk-real",
         langfuse_base_url="https://custom.langfuse.example",
+        app_env="prod",
     )
     monkeypatch.setattr("src.tracing.get_settings", lambda: settings)
     monkeypatch.setattr("src.tracing.Langfuse", _FakeLangfuseClient)
@@ -113,6 +121,7 @@ def test_get_langfuse_client_builds_from_settings_only(monkeypatch):
     assert client.public_key == "pk-real"
     assert client.secret_key == "sk-real"
     assert client.base_url == "https://custom.langfuse.example"
+    assert client.environment == "prod"
 
 
 # --- shutdown_tracing ---

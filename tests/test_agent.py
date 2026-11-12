@@ -39,6 +39,7 @@ from src.agent import (
     validate_input_node,
 )
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
+from src.logs import configure_logging
 from src.pricing import (
     canonical_timestamp,
     observation_fingerprint,
@@ -187,6 +188,68 @@ def test_invoke_with_retries_mixed_run_records_only_answered_attempts():
     assert [record["attempt"] for record in usage] == [1, 3]
     assert usage[0]["outcome"] == "invalid_output"
     assert usage[1]["outcome"] == "ok"
+
+
+def test_invoke_with_retries_logs_llm_retry_before_each_backoff_sleep(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+    fake = _FakeStepLLM([_client_error("ThrottlingException", "do not log this")] * 3)
+
+    invoke_with_retries(fake, [])
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    retries = [line for line in lines if line["event"] == "llm_retry"]
+    assert [retry["attempt"] for retry in retries] == [1, 2]
+    assert all(retry["level"] == "WARNING" for retry in retries)
+    assert all(retry["error_code"] == "ThrottlingException" for retry in retries)
+
+
+def test_invoke_with_retries_logs_llm_failed_with_codes_only_on_exhaustion(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+    fake = _FakeStepLLM([_client_error("ThrottlingException", "do not log this")] * 3)
+
+    invoke_with_retries(fake, [])
+
+    out = capsys.readouterr().out
+    lines = [json.loads(line) for line in out.splitlines()]
+    failed = next(line for line in lines if line["event"] == "llm_failed")
+    assert failed["level"] == "ERROR"
+    assert failed["attempts"] == 3
+    assert failed["error_codes"] == ["ThrottlingException"] * 3
+    assert "do not log this" not in out
+
+
+def test_invoke_with_retries_logs_llm_failed_immediately_on_non_retryable_error(
+    capsys,
+):
+    configure_logging()
+    fake = _FakeStepLLM([_client_error("AccessDeniedException", "do not log this")])
+
+    invoke_with_retries(fake, [])
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [line["event"] for line in lines] == ["llm_failed"]
+    assert lines[0]["error_codes"] == ["AccessDeniedException"]
+
+
+def test_invoke_with_retries_direct_call_without_ids_logs_none_for_both(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+    fake = _FakeStepLLM([_client_error("ThrottlingException")] * 3)
+
+    invoke_with_retries(fake, [])  # no run_id/product_id passed
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines  # llm_retry x2 + llm_failed
+    assert all(line["run_id"] is None for line in lines)
+    assert all(line["product_id"] is None for line in lines)
 
 
 # escalate_node now calls _cap_brief/_market_brief whenever needs_brief is
@@ -460,6 +523,8 @@ def test_escalate_node_competitor_move_single_trigger():
 
 def test_escalate_node_competitor_move_double_trigger():
     state = {
+        "run_id": "r1",
+        "product_id": "g4",
         "escalation_cause": "competitor_move",
         "triggered": [
             {
@@ -487,6 +552,7 @@ def test_escalate_node_competitor_move_double_trigger():
 def _cap_escalation_state(**overrides):
     state = {
         "run_id": "r1",
+        "product_id": "g4",
         "escalation_cause": "cap_exceeded",
         "target_price": 40,
         "target_label": "high",
@@ -581,6 +647,8 @@ def test_escalate_node_cap_exceeded_brief_appends_to_existing_usage():
 
 def test_escalate_node_competitor_move_double_trigger_brief_filled():
     state = {
+        "run_id": "r1",
+        "product_id": "g4",
         "escalation_cause": "competitor_move",
         "triggered": [
             {
@@ -802,6 +870,7 @@ def test_check_move_size_node_tie_undercut_overrides_llm_to_direct():
 def _llm_state(**overrides):
     state = {
         "run_id": "r1",
+        "product_id": "g4",
         "current_price": 90,
         "target_price": 96,
         "anchor": 92,
@@ -858,6 +927,24 @@ def test_llm_step_size_node_parsing_error_escalates(monkeypatch):
     assert result["llm_errors"] == ["invalid output: failed schema validation"] * 3
     assert [record["call"] for record in result["llm_usage"]] == ["step"] * 3
     assert [record["attempt"] for record in result["llm_usage"]] == [1, 2, 3]
+
+
+def test_llm_step_size_node_logs_retry_and_failed_with_run_id_and_product_id(
+    monkeypatch, capsys
+):
+    fake = _FakeStepLLM(
+        {"parsed": None, "parsing_error": ValueError("bad output"), "raw": None}
+    )
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+
+    llm_step_size_node(_llm_state(run_id="r1", product_id="g4"))
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines  # llm_retry x2 + llm_failed
+    assert all(line["run_id"] == "r1" for line in lines)
+    assert all(line["product_id"] == "g4" for line in lines)
 
 
 def test_llm_step_size_node_parsed_none_no_error_escalates(monkeypatch):
@@ -1024,6 +1111,7 @@ def test_build_market_move_text_two_triggered():
 def _cap_brief_state(**overrides):
     state = {
         "run_id": "r1",
+        "product_id": "g4",
         "current_price": 90,
         "anchor": 90,
         "target_price": 120,
@@ -1083,6 +1171,20 @@ def test_cap_brief_three_failures_returns_none(monkeypatch):
     assert attempts == 3
 
 
+def test_cap_brief_logs_failure_with_run_id_and_product_id(monkeypatch, capsys):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+
+    _cap_brief(_cap_brief_state(run_id="r1", product_id="g4"))
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines  # llm_retry x2 + llm_failed
+    assert all(line["run_id"] == "r1" for line in lines)
+    assert all(line["product_id"] == "g4" for line in lines)
+
+
 def test_cap_brief_human_message_contains_months_and_target_reason(monkeypatch):
     fake = _FakeStepLLM(
         {
@@ -1105,6 +1207,7 @@ def test_cap_brief_human_message_contains_months_and_target_reason(monkeypatch):
 def _market_brief_state(**overrides):
     state = {
         "run_id": "r1",
+        "product_id": "g4",
         "comp_prices": [100, 55, 48],
         "prev_comp_prices": [74, 39.24, 50],
         "comp_ratings": [4.5, 4.0, 3.8],
@@ -1166,6 +1269,20 @@ def test_market_brief_three_failures_returns_none(monkeypatch):
     assert brief is None
     assert errors == ["invalid output: no structured answer"] * 3
     assert attempts == 3
+
+
+def test_market_brief_logs_failure_with_run_id_and_product_id(monkeypatch, capsys):
+    fake = _FakeStepLLM([{"parsed": None, "parsing_error": None, "raw": None}] * 3)
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
+    monkeypatch.setattr("src.agent.time.sleep", lambda seconds: None)
+    configure_logging()
+
+    _market_brief(_market_brief_state(run_id="r1", product_id="g4"))
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines  # llm_retry x2 + llm_failed
+    assert all(line["run_id"] == "r1" for line in lines)
+    assert all(line["product_id"] == "g4" for line in lines)
 
 
 def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch):
@@ -1800,6 +1917,41 @@ def test_app_invoke_reason_direct():
     assert result["reason"]
 
 
+def test_app_invoke_direct_path_logs_one_node_end_per_executed_node(capsys):
+    configure_logging()
+    proceed = {
+        **base,
+        "comp_prices": [80, 40, 35],
+        "prev_comp_prices": [74, 39.24, 39.24],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "our_rating": 4.0,
+        "current_price": 39,
+        "min_price": 1,
+        "max_price": 1000,
+        "anchor": 37,
+    }
+
+    app.invoke(proceed)
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    node_ends = [line["node"] for line in lines if line["event"] == "node_end"]
+    assert node_ends == [
+        "validate_input_node",
+        "gate_node",
+        "competitor_move_check_node",
+        "pair_competitors_node",
+        "analyze_position_node",
+        "resolve_target_price_node",
+        "check_move_size_node",
+        "compute_step_node",
+        "apply_dominance_clamp_node",
+        "enforce_bounds_node",
+        "reason_node",
+        "persist_node",
+    ]
+    assert all(line["event"] != "node_error" for line in lines)
+
+
 def test_app_invoke_reason_llm(monkeypatch):
     fake = _FakeStepLLM(
         {
@@ -1823,6 +1975,38 @@ def test_app_invoke_reason_llm(monkeypatch):
     result = app.invoke(proceed)
     assert result["llm_step_pct"] == 0.02
     assert "Model rationale: Test rationale." in result["reason"]
+
+
+def test_app_invoke_logs_never_contain_a_price_value_or_the_system_prompt(
+    monkeypatch, capsys
+):
+    fake = _FakeStepLLM(
+        {
+            "parsed": StepDecision(step_pct=0.02, rationale="Test rationale."),
+            "parsing_error": None,
+            "raw": None,
+        }
+    )
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    configure_logging()
+    proceed = {
+        **base,
+        "comp_prices": [80, 40, 35],
+        "prev_comp_prices": [74, 39.24, 39.24],
+        "comp_ratings": [4.5, 4.2, 3.8],
+        "our_rating": 4.3,
+        "current_price": 56,
+        "min_price": 1,
+        "max_price": 55,
+        "anchor": 56,
+    }
+
+    result = app.invoke(proceed)
+
+    out = capsys.readouterr().out
+    assert str(result["price"]) not in out
+    assert STEP_SIZE_SYSTEM_PROMPT not in out
+    assert "Test rationale." not in out
 
 
 # --- llm_step_size_node: retries and failure -> escalate ---
