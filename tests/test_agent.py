@@ -3,12 +3,16 @@ import os
 import sqlite3
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import TypedDict
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
+from langgraph.errors import GraphRecursionError
+from langgraph.graph import START, StateGraph
 
 from src import staging
 from src.agent import (
+    GRAPH_RECURSION_LIMIT,
     _cap_brief,
     _llm_call_rows,
     _market_brief,
@@ -36,6 +40,7 @@ from src.agent import (
     route_comp_move_check,
     route_gate,
     route_llm_step_size,
+    run_budget_exhausted,
     validate_input_node,
 )
 from src.llm_schemas import CapExceededBrief, MarketMoveBrief, StepDecision
@@ -598,6 +603,18 @@ def test_escalate_node_missing_cause():
         escalate_node({})
 
 
+def test_escalate_node_budget_exceeded_no_brief_detail_pack_has_budget(monkeypatch):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "2.5")
+    result = escalate_node(
+        {"run_id": "r1", "product_id": "g4", "escalation_cause": "budget_exceeded"}
+    )
+    assert result["needs_brief"] is False
+    assert result["brief"] is None
+    assert result["detail_pack"] == {"max_run_cost_usd": 2.5}
+    assert "brief_errors" not in result
+    assert "llm_usage" not in result
+
+
 def test_escalate_node_cap_exceeded_brief_filled():
     result = escalate_node(_cap_escalation_state())
     assert result["brief"] == {
@@ -616,6 +633,61 @@ def test_escalate_node_cap_exceeded_brief_filled():
             "call": "cap_brief",
         }
     ]
+
+
+def test_escalate_node_cap_exceeded_brief_skipped_when_budget_exhausted(
+    monkeypatch, _mock_staging_db, capsys
+):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.0,
+            )
+        ],
+    )
+    fake = _FakeStepLLM(
+        {
+            "parsed": CapExceededBrief(
+                recommendation="multi_month_path", rationale="x"
+            ),
+            "parsing_error": None,
+            "raw": None,
+        }
+    )
+    monkeypatch.setattr("src.agent.get_cap_brief_llm", lambda: fake)
+    configure_logging()
+
+    result = escalate_node(_cap_escalation_state())
+
+    # The escalation itself (cause, detail_pack, needs_brief) proceeds
+    # unchanged -- only the brief call is skipped.
+    assert result["needs_brief"] is True
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+    assert "brief_attempts" not in result
+    assert "llm_usage" not in result
+    assert fake.call_count == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    budget_lines = [line for line in lines if line["event"] == "budget_exceeded"]
+    assert len(budget_lines) == 1
+    assert budget_lines[0]["level"] == "WARNING"
+    assert budget_lines[0]["run_id"] == "r1"
+    assert budget_lines[0]["product_id"] == "g4"
+    assert budget_lines[0]["call"] == "cap_brief"
 
 
 def test_escalate_node_cap_exceeded_brief_appends_to_existing_usage():
@@ -686,6 +758,75 @@ def test_escalate_node_competitor_move_double_trigger_brief_filled():
             "call": "market_brief",
         }
     ]
+
+
+def test_escalate_node_competitor_move_brief_skipped_when_budget_exhausted(
+    monkeypatch, _mock_staging_db, capsys
+):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.0,
+            )
+        ],
+    )
+    fake = _FakeStepLLM(
+        {
+            "parsed": MarketMoveBrief(likely_cause="market_shift", rationale="x"),
+            "parsing_error": None,
+            "raw": None,
+        }
+    )
+    monkeypatch.setattr("src.agent.get_market_brief_llm", lambda: fake)
+    configure_logging()
+
+    state = {
+        "run_id": "r1",
+        "product_id": "g4",
+        "escalation_cause": "competitor_move",
+        "triggered": [
+            {
+                "index": 0,
+                "comp_price_new": 100,
+                "comp_price_prev": 74,
+                "percent_change": 35.1,
+            },
+            {
+                "index": 1,
+                "comp_price_new": 55,
+                "comp_price_prev": 39.24,
+                "percent_change": 40.2,
+            },
+        ],
+        "comp_prices": [100, 55, 39.0],
+        "prev_comp_prices": [74, 39.24, 39.24],
+        "comp_ratings": [4.5, 4.0, 3.8],
+        "percent_diff": [35.1, 40.2, -0.6],
+    }
+    result = escalate_node(state)
+
+    assert result["needs_brief"] is True
+    assert result["brief"] is None
+    assert "brief_errors" not in result
+    assert fake.call_count == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    budget_lines = [line for line in lines if line["event"] == "budget_exceeded"]
+    assert len(budget_lines) == 1
+    assert budget_lines[0]["call"] == "market_brief"
 
 
 def test_escalate_node_competitor_move_single_trigger_no_brief_keys():
@@ -866,6 +1007,79 @@ def test_check_move_size_node_tie_undercut_overrides_llm_to_direct():
     assert "escalation_cause" not in result
 
 
+# --- run_budget_exhausted ---
+def test_run_budget_exhausted_below_budget_is_false(monkeypatch, _mock_staging_db):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                0.5,
+            )
+        ],
+    )
+    assert run_budget_exhausted("r1") is False
+
+
+def test_run_budget_exhausted_at_budget_is_true(monkeypatch, _mock_staging_db):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.0,
+            )
+        ],
+    )
+    assert run_budget_exhausted("r1") is True
+
+
+def test_run_budget_exhausted_above_budget_is_true(monkeypatch, _mock_staging_db):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.5,
+            )
+        ],
+    )
+    assert run_budget_exhausted("r1") is True
+
+
 # --- llm_step_size_node (get_step_llm mocked; no test may call Bedrock) ---
 def _llm_state(**overrides):
     state = {
@@ -980,6 +1194,71 @@ def test_llm_step_size_node_at_target_no_call(monkeypatch):
     result = llm_step_size_node(_llm_state(current_price=96, target_price=96))
     assert result == {}
     assert fake.messages is None
+
+
+def test_llm_step_size_node_at_target_shortcut_never_touches_the_db(monkeypatch):
+    # The at-target shortcut must return before run_budget_exhausted ever
+    # calls get_connection(); this proves it, instead of just checking
+    # nothing got written (which a read-only touch wouldn't catch).
+    def _boom():
+        raise AssertionError("get_connection must not be called when already at target")
+
+    monkeypatch.setattr("src.agent.get_connection", _boom)
+
+    result = llm_step_size_node(_llm_state(current_price=96, target_price=96))
+
+    assert result == {}
+
+
+def test_llm_step_size_node_budget_exhausted_escalates_without_calling_llm(
+    monkeypatch, _mock_staging_db, capsys
+):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.0,
+            )
+        ],
+    )
+    fake = _FakeStepLLM(
+        {
+            "parsed": StepDecision(step_pct=0.02, rationale="x"),
+            "parsing_error": None,
+            "raw": None,
+        }
+    )
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+    configure_logging()
+
+    result = llm_step_size_node(_llm_state())
+
+    assert result == {
+        "escalate": True,
+        "tier": "medium",
+        "escalation_cause": "budget_exceeded",
+    }
+    assert fake.call_count == 0
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    budget_lines = [line for line in lines if line["event"] == "budget_exceeded"]
+    assert len(budget_lines) == 1
+    assert budget_lines[0]["level"] == "WARNING"
+    assert budget_lines[0]["run_id"] == "r1"
+    assert budget_lines[0]["product_id"] == "g4"
+    assert budget_lines[0]["call"] == "step"
 
 
 def test_llm_step_size_node_human_text_upward(monkeypatch):
@@ -1308,6 +1587,40 @@ def test_market_brief_human_message_contains_counts_and_flagged_line(monkeypatch
 
 
 # --- app.invoke, graph-level ---
+def test_app_carries_recursion_limit_25_in_its_bound_config():
+    assert GRAPH_RECURSION_LIMIT == 25
+    assert app.config.get("recursion_limit") == GRAPH_RECURSION_LIMIT
+
+
+class _LoopState(TypedDict):
+    count: int
+
+
+def _increment(state: _LoopState) -> dict:
+    return {"count": state["count"] + 1}
+
+
+def test_a_looping_graph_built_the_same_way_raises_at_the_recursion_limit():
+    # Mirrors how app itself is built (graph.compile().with_config(...)):
+    # proves the recursion_limit is actually enforced, not just recorded.
+    loop_graph = StateGraph(_LoopState)
+    loop_graph.add_node("increment", _increment)
+    loop_graph.add_edge(START, "increment")
+    loop_graph.add_edge("increment", "increment")
+    looping_app = loop_graph.compile().with_config(
+        recursion_limit=GRAPH_RECURSION_LIMIT
+    )
+
+    with pytest.raises(GraphRecursionError):
+        looping_app.invoke({"count": 0})
+
+
+def test_app_get_graph_still_works_through_the_bound_config():
+    # app is a RunnableBinding wrapping the compiled graph; get_graph (and
+    # any other CompiledStateGraph attribute) must still delegate through.
+    assert app.get_graph() is not None
+
+
 base = {
     "run_id": "r1",
     "product_id": "g4",
@@ -1618,6 +1931,14 @@ def test_reason_node_llm_failed_exact_text():
     assert (
         result["reason"]
         == "Escalated (medium): step-size model failed after 1 attempt (AccessDeniedException)."
+    )
+
+
+def test_reason_node_budget_exceeded_exact_text():
+    result = reason_node({"escalation_cause": "budget_exceeded"})
+    assert result["reason"] == (
+        "Escalated (medium): the run's LLM budget was reached; "
+        "the step-size model was not called."
     )
 
 
@@ -2099,6 +2420,47 @@ def test_llm_step_size_non_retryable_code_stops_after_one_attempt(monkeypatch):
     assert result["llm_attempts"] == 1
     assert result["escalation_cause"] == "llm_failed"
     assert result["llm_errors"] == ["AccessDeniedException: denied"]
+
+
+# 6. Run budget already exhausted -> step LLM never called; the graph
+#    routes to escalate_node/reason_node with escalation_cause ==
+#    budget_exceeded instead of proceeding to compute_step.
+def test_llm_step_size_budget_exhausted_full_graph_escalates(
+    monkeypatch, _mock_staging_db
+):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "1.0")
+    staging.record_llm_calls(
+        _mock_staging_db,
+        [
+            (
+                "r1",
+                "g4",
+                "2018-09-01T10:00:00Z",
+                "step",
+                1,
+                1000,
+                200,
+                "ok",
+                "req-1",
+                3.0,
+                15.0,
+                1.0,
+            )
+        ],
+    )
+    fake = _FakeStepLLM(_step_decision_result())
+    monkeypatch.setattr("src.agent.get_step_llm", lambda: fake)
+
+    result = app.invoke(_llm_proceed_state())
+
+    assert fake.call_count == 0
+    assert result["escalation_cause"] == "budget_exceeded"
+    assert result["tier"] == "medium"
+    assert "price" not in result
+    assert result["reason"] == (
+        "Escalated (medium): the run's LLM budget was reached; "
+        "the step-size model was not called."
+    )
 
 
 # 6. Schema failure, then success -> invoke called 2 times, priced.
@@ -3044,7 +3406,17 @@ def test_route_check_move_size_unknown_raises():
 
 # --- route_llm_step_size ---
 def test_route_llm_step_size_llm_failed_escalates():
-    assert route_llm_step_size({"escalation_cause": "llm_failed"}) == "escalate"
+    assert (
+        route_llm_step_size({"escalate": True, "escalation_cause": "llm_failed"})
+        == "escalate"
+    )
+
+
+def test_route_llm_step_size_budget_exceeded_escalates():
+    assert (
+        route_llm_step_size({"escalate": True, "escalation_cause": "budget_exceeded"})
+        == "escalate"
+    )
 
 
 def test_route_llm_step_size_no_escalation_cause_computes_step():

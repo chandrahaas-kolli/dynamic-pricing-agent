@@ -17,11 +17,18 @@ Flow:
                           (llm is overridden to direct for tie targets):
                            escalate -> escalate_node (escalation_cause=cap_exceeded) -> reason -> persist -> END
                            llm      -> llm_step_size -> route on outcome:
-                                           escalate (escalation_cause=llm_failed)
+                                           escalate (escalation_cause=llm_failed
+                                           or budget_exceeded, when the run's
+                                           LLM budget is already spent)
                                                -> escalate_node -> reason -> persist -> END
                                            compute_step -> compute_step
                                                -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
                            direct   -> compute_step -> apply_dominance_clamp -> enforce_bounds -> reason -> persist -> END
+
+app is the compiled graph bound to GRAPH_RECURSION_LIMIT
+(graph.compile().with_config(...)), so every call through app -- invoke,
+stream, or anything else -- carries that limit automatically; no caller
+passes it.
 """
 
 import sqlite3
@@ -562,6 +569,21 @@ def check_move_size_node(state: PipelineState) -> dict:
     return {"path": path, "x_anchor": x_anchor}
 
 
+def run_budget_exhausted(run_id) -> bool:
+    """True once this run's total LLM cost (staging.run_cost) reaches
+    Settings' max_run_cost_usd.
+
+    Counts only products already persisted -- persist_node is what writes
+    llm_calls rows, so the product currently being priced never counts
+    against its own check. A run can therefore overshoot the budget by at
+    most one more product's worth of LLM calls before the next product
+    sees it as exhausted.
+    """
+    conn = get_connection()
+    spent = staging.run_cost(conn, run_id)["estimated_cost_usd"]
+    return spent >= get_settings().max_run_cost_usd
+
+
 def llm_step_size_node(state: PipelineState) -> dict:
     """Ask the LLM how large a step to take toward the target (llm path only).
 
@@ -573,7 +595,12 @@ def llm_step_size_node(state: PipelineState) -> dict:
     call="step") is set on both the success and failure paths below; on
     this no-call shortcut it is omitted entirely, since no attempt was made.
 
-    If the price is already at the target, no call is made. Otherwise the
+    If the price is already at the target, no call is made. If the run's
+    LLM budget (run_budget_exhausted) is already exhausted, no call is
+    made either: returns escalate=True, tier='medium',
+    escalation_cause='budget_exceeded' and nothing else (no
+    llm_errors/llm_attempts/llm_usage, since no attempt was made) --
+    never falls back to pricing at the target directly. Otherwise the
     call (with retries) is delegated to invoke_with_retries; see its
     docstring for what it retries, what it stops on, and what it returns.
 
@@ -587,6 +614,20 @@ def llm_step_size_node(state: PipelineState) -> dict:
 
     if round(current_price, 2) == round(target_price, 2):
         return {}
+
+    if run_budget_exhausted(state["run_id"]):
+        log_event(
+            "budget_exceeded",
+            level="WARNING",
+            run_id=state["run_id"],
+            product_id=state["product_id"],
+            call="step",
+        )
+        return {
+            "escalate": True,
+            "tier": "medium",
+            "escalation_cause": "budget_exceeded",
+        }
 
     direction = "up" if target_price > current_price else "down"
     remaining_pct = abs(target_price - current_price) / anchor
@@ -684,26 +725,33 @@ def enforce_bounds_node(state: PipelineState) -> dict:
 
 
 def escalate_node(state: PipelineState) -> dict:
-    """Merged escalation for competitor_move, cap_exceeded, llm_failed and data_conflict.
+    """Merged escalation for competitor_move, cap_exceeded, llm_failed,
+    data_conflict and budget_exceeded.
 
     Decides the detail_pack and whether a brief is needed by
     escalation_cause: competitor_move further by len(triggered) (2+
     simultaneous triggers -> needs_brief); cap_exceeded always needs a
-    brief; llm_failed and data_conflict never do (llm_failed already
-    exhausted automated options; data_conflict is for a human to pick a
-    version, not to be summarized).
+    brief; llm_failed, data_conflict and budget_exceeded never do
+    (llm_failed already exhausted automated options; data_conflict is for
+    a human to pick a version, not to be summarized; budget_exceeded means
+    the run has no LLM budget left to spend on a brief either).
+    budget_exceeded's detail_pack records the configured max_run_cost_usd
+    that was reached.
 
-    When needs_brief, calls the matching brief (_cap_brief for cap_exceeded,
-    _market_brief for competitor_move) and adds brief_errors/brief_attempts
-    to the result; a failed brief (brief None) never raises and never
-    changes detail_pack. When needs_brief is False, brief stays None and
+    When needs_brief, and the run's LLM budget (run_budget_exhausted)
+    isn't already exhausted, calls the matching brief (_cap_brief for
+    cap_exceeded, _market_brief for competitor_move) and adds
+    brief_errors/brief_attempts to the result; a failed brief (brief None)
+    never raises and never changes detail_pack. When needs_brief is False,
+    or the budget is exhausted (logged as budget_exceeded; a skipped brief
+    never blocks the escalation), brief stays None and
     brief_errors/brief_attempts are omitted entirely.
 
     The brief call's llm_usage is appended to any usage already in state
-    (never overwritten) and returned under "llm_usage"; on the llm_failed
-    path (no brief call), "llm_usage" is left out of the result entirely so
-    the usage llm_step_size_node already recorded for the step call passes
-    through the merge untouched.
+    (never overwritten) and returned under "llm_usage"; when no brief call
+    is made (llm_failed, budget_exceeded, or a budget-skipped brief),
+    "llm_usage" is left out of the result entirely so any usage recorded
+    earlier in the run passes through the merge untouched.
     """
     cause = state.get("escalation_cause")
     if cause == "competitor_move":
@@ -734,19 +782,34 @@ def escalate_node(state: PipelineState) -> dict:
     elif cause == "data_conflict":
         detail_pack = state["conflict"]
         needs_brief = False
+    elif cause == "budget_exceeded":
+        detail_pack = {"max_run_cost_usd": get_settings().max_run_cost_usd}
+        needs_brief = False
     else:
         raise ValueError(f"unexpected escalation_cause: {cause}")
 
     result = {"detail_pack": detail_pack, "needs_brief": needs_brief, "brief": None}
     if needs_brief:
-        if cause == "cap_exceeded":
-            brief, errors, attempts, usage = _cap_brief(state)
-        elif cause == "competitor_move":
-            brief, errors, attempts, usage = _market_brief(state)
+        if run_budget_exhausted(state["run_id"]):
+            call = "cap_brief" if cause == "cap_exceeded" else "market_brief"
+            log_event(
+                "budget_exceeded",
+                level="WARNING",
+                run_id=state["run_id"],
+                product_id=state["product_id"],
+                call=call,
+            )
         else:
-            raise ValueError(f"unexpected escalation_cause needing a brief: {cause}")
-        result.update(brief=brief, brief_errors=errors, brief_attempts=attempts)
-        result["llm_usage"] = state.get("llm_usage", []) + usage
+            if cause == "cap_exceeded":
+                brief, errors, attempts, usage = _cap_brief(state)
+            elif cause == "competitor_move":
+                brief, errors, attempts, usage = _market_brief(state)
+            else:
+                raise ValueError(
+                    f"unexpected escalation_cause needing a brief: {cause}"
+                )
+            result.update(brief=brief, brief_errors=errors, brief_attempts=attempts)
+            result["llm_usage"] = state.get("llm_usage", []) + usage
     return result
 
 
@@ -761,12 +824,13 @@ def reason_node(state: PipelineState) -> dict:
     Runs on every path (held, escalated, no-change, and priced) as the
     graph's last node. Checked in order: gate == 'held' (product has an
     open escalation; pricing was skipped entirely), then escalation_cause
-    (competitor_move, cap_exceeded, llm_failed or data_conflict escalation
-    text, or ValueError on any other cause that is present), then
-    action == 'none' (below the deadband), then the priced case
-    (direct/llm paths) — which explains target_source and appends clauses
-    for any partial step or clamp that fired. Invalid input never reaches
-    here, since validate_input raises before any node runs.
+    (competitor_move, cap_exceeded, llm_failed, budget_exceeded or
+    data_conflict escalation text, or ValueError on any other cause that
+    is present), then action == 'none' (below the deadband), then the
+    priced case (direct/llm paths) — which explains target_source and
+    appends clauses for any partial step or clamp that fired. Invalid
+    input never reaches here, since validate_input raises before any node
+    runs.
 
     On competitor_move and cap_exceeded, appends " Brief unavailable." when
     a brief was needed but the LLM call failed (needs_brief True, brief
@@ -798,6 +862,11 @@ def reason_node(state: PipelineState) -> dict:
         codes = ", ".join(error.split(":", 1)[0] for error in state["llm_errors"])
         text = f"Escalated (medium): step-size model failed after {llm_attempts} {attempt_word} ({codes})."
         return {"reason": text}
+    elif cause == "budget_exceeded":
+        return {
+            "reason": "Escalated (medium): the run's LLM budget was reached; "
+            "the step-size model was not called."
+        }
     elif cause == "data_conflict":
         stored_outcome = state["conflict"]["stored_outcome"]
         text = (
@@ -1065,10 +1134,11 @@ def route_check_move_size(state: PipelineState) -> str:
 
 
 def route_llm_step_size(state: PipelineState) -> str:
-    """Return 'escalate' if the step-size call failed after retries, else 'compute_step'."""
-    outcome = (
-        "escalate" if state.get("escalation_cause") == "llm_failed" else "compute_step"
-    )
+    """Return 'escalate' if the step-size call failed after retries or the
+    run's LLM budget was exhausted (both set escalate=True), else
+    'compute_step'.
+    """
+    outcome = "escalate" if state.get("escalate") else "compute_step"
     for route in ("escalate", "compute_step"):
         if outcome == route:
             return route
@@ -1076,6 +1146,15 @@ def route_llm_step_size(state: PipelineState) -> str:
 
 
 # ---------- Graph wiring ----------
+
+# The longest normal path (proceed -> llm -> escalate=False -> compute_step
+# -> apply_dominance_clamp -> enforce_bounds -> reason -> persist, counting
+# from validate_input through gate and the proceed branches) is 13 node
+# steps, so 25 is never reached by normal operation -- it only stops an
+# accidental loop in the graph wiring, within a couple of laps of it
+# forming. A constant, not a Settings field: this guards a wiring bug, not
+# something an operator should ever need to tune.
+GRAPH_RECURSION_LIMIT = 25
 
 graph = StateGraph(PipelineState)
 
@@ -1154,4 +1233,4 @@ graph.add_edge("no_action_node", "reason_node")
 graph.add_edge("reason_node", "persist_node")
 graph.add_edge("persist_node", END)
 
-app = graph.compile()
+app = graph.compile().with_config(recursion_limit=GRAPH_RECURSION_LIMIT)

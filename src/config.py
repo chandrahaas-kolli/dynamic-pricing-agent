@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     )
     # Passed to Langfuse as the trace environment (see src/tracing.py).
     app_env: Literal["dev", "prod"] = Field(default="dev")
+    # Per-run LLM spend cap (see src/agent.py's run_budget_exhausted);
+    # estimated cost, not billing truth.
+    max_run_cost_usd: float = Field(default=1.0, gt=0)
 
     @field_validator("staging_db_path")
     @classmethod

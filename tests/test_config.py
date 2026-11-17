@@ -22,6 +22,7 @@ def _isolate_env(monkeypatch):
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
     monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("MAX_RUN_COST_USD", raising=False)
 
 
 def test_defaults_load():
@@ -38,6 +39,7 @@ def test_defaults_load():
     assert settings.langfuse_secret_key is None
     assert settings.langfuse_base_url == "https://us.cloud.langfuse.com"
     assert settings.app_env == "dev"
+    assert settings.max_run_cost_usd == 1.0
 
 
 def test_invalid_bedrock_region_raises(monkeypatch):
@@ -186,5 +188,18 @@ def test_app_env_accepts_prod(monkeypatch):
 
 def test_app_env_rejects_unknown_value(monkeypatch):
     monkeypatch.setenv("APP_ENV", "staging")
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)
+
+
+def test_max_run_cost_usd_env_override(monkeypatch):
+    monkeypatch.setenv("MAX_RUN_COST_USD", "5.5")
+    settings = Settings(_env_file=None)
+    assert settings.max_run_cost_usd == 5.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_max_run_cost_usd_rejects_zero_and_negative(monkeypatch, value):
+    monkeypatch.setenv("MAX_RUN_COST_USD", value)
     with pytest.raises(pydantic.ValidationError):
         Settings(_env_file=None)
